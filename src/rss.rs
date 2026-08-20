@@ -46,6 +46,10 @@ pub fn parse_rss_bytes(body: &[u8]) -> Result<Vec<RssItem>> {
                 .map(|g| g.value().to_string())
                 .unwrap_or_default();
             let enclosure_url = it.enclosure().map(|e| e.url().to_string());
+            let enclosure_type = it
+                .enclosure()
+                .map(|e| e.mime_type().to_string())
+                .filter(|s| !s.is_empty());
             // 磁力直接取；否则保留 enclosure/description 里的 magnet，或留作 .torrent 解析
             let magnet = enclosure_url
                 .as_ref()
@@ -57,6 +61,7 @@ pub fn parse_rss_bytes(body: &[u8]) -> Result<Vec<RssItem>> {
                 link,
                 magnet,
                 enclosure_url,
+                enclosure_type,
                 guid,
             }
         })
@@ -78,7 +83,8 @@ pub async fn resolve_magnet(
         return Some(m.clone());
     }
     let url = item.enclosure_url.as_ref()?;
-    if !looks_like_torrent(url) {
+    let is_torrent = is_torrent_enclosure(url, item.enclosure_type.as_deref());
+    if !is_torrent {
         return None;
     }
     let candidates = torrent_download_candidates(url, feed_url);
@@ -93,6 +99,15 @@ pub async fn resolve_magnet(
         tracing::warn!("所有 .torrent 下载均失败（最后尝试 {u}）");
     }
     None
+}
+
+/// 判断 enclosure 是否为种子：URL 形如 .torrent，或 MIME 类型为 x-bittorrent
+/// （kisssub 用 v2.uploadbt.com/?r=down&hash=... 这种不带 .torrent 后缀的下载地址）
+fn is_torrent_enclosure(url: &str, mime: Option<&str>) -> bool {
+    if looks_like_torrent(url) {
+        return true;
+    }
+    mime.map(|m| m.contains("bittorrent") || m.contains("torrent")).unwrap_or(false)
 }
 
 /// .torrent 下载候选：原链接优先；原链接主机与 RSS 源主机不同则追加"换主机"候选
@@ -132,7 +147,12 @@ async fn download_torrent_magnet(http: &reqwest::Client, url: &str) -> Option<St
     };
     match torrent_to_magnet(&bytes) {
         Some(m) => {
-            tracing::info!("从 .torrent 解析到磁力: {m}");
+            let hash: String = m
+                .find("btih:")
+                .and_then(|i| m[i + 5..].get(..12))
+                .unwrap_or("?")
+                .to_string();
+            tracing::info!("从 .torrent 解析到磁力 …{hash}");
             Some(m)
         }
         None => {
@@ -211,6 +231,15 @@ mod tests {
         assert!(looks_like_torrent("https://x.com/download/torrent/abc123/foo.torrent"));
         assert!(looks_like_torrent("http://x.com/torrent/abc123"));
         assert!(!looks_like_torrent("https://x.com/episode/123"));
+    }
+
+    #[test]
+    fn mime_type_detects_uploadbt() {
+        // kisssub: v2.uploadbt.com 下载地址不带 .torrent 后缀，靠 MIME 判断
+        let url = "http://v2.uploadbt.com/?r=down&hash=7066d083e3016f690e2244a0655d26da3507736e";
+        assert!(is_torrent_enclosure(url, Some("application/x-bittorrent")));
+        assert!(!is_torrent_enclosure(url, None));
+        assert!(!is_torrent_enclosure("https://x.com/page", None));
     }
 
     #[test]

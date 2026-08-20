@@ -55,6 +55,7 @@ pub struct RssItem {
     pub link: String,
     pub magnet: Option<String>,
     pub enclosure_url: Option<String>,
+    pub enclosure_type: Option<String>,
     pub guid: String,
 }
 
