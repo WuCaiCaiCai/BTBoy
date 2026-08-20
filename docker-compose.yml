@@ -14,6 +14,8 @@ services:
       FETCH_INTERVAL_MIN: "5"
       # 可选：日志级别
       RUST_LOG: "info"
+      # 可选：TMDB API Key（封面推送，申请 https://www.themoviedb.org/settings/api）
+      TMDB_API_KEY: ""
     volumes:
       - ./data:/data
     # 默认端口不需要暴露（Telegram 长轮询出站）

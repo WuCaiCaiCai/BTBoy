@@ -21,6 +21,7 @@ fn test_state() -> Arc<crate::AppState> {
         fetch_interval_min: 5,
         db_path: ":memory:".into(),
         log_level: "warn".into(),
+        tmdb_api_key: None,
     };
     let http = reqwest::Client::builder().user_agent("test").build().unwrap();
     let bot = Bot::new("test");
@@ -30,6 +31,7 @@ fn test_state() -> Arc<crate::AppState> {
         http,
         bot,
         started: std::time::Instant::now(),
+        poster_cache: Arc::new(std::sync::Mutex::new(std::collections::HashMap::new())),
     })
 }
 

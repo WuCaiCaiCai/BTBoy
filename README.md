@@ -23,6 +23,7 @@
 - **冲突询问**：同集多来源（ABEMA/CR/Baha）或多版本（07 与 07v2）时弹按钮问你，选一次记住偏好
 - **查重去重**：磁力 hash 级去重，绝不重复推
 - **定时推送**：默认每 5 分钟轮询，固定格式发到频道
+- **🖼 封面推送**：配置 TMDB Key 后，推送为"封面 + 名称 + 磁力"图文，添加订阅时可选封面
 - **备用 RSS / 自动停用 / 遗漏检测 / 摸鱼检测**：追更省心
 
 ## 快速开始
@@ -32,6 +33,7 @@
 docker run -d --name btboy --restart unless-stopped \
   -e TELEGRAM_BOT_TOKEN=你的Token \
   -e ADMIN_ID=你的数字ID \
+  -e TMDB_API_KEY=你的TMDBKey \
   -v $PWD/data:/data \
   wucaicai/btboy:latest
 
@@ -84,6 +86,7 @@ docker run -d --name btboy --restart unless-stopped \
 | `FETCH_INTERVAL_MIN` | 选 | 轮询间隔分钟，默认 5 |
 | `RUST_LOG` | 选 | 日志级别，默认 info |
 | `DB_PATH` | 选 | 数据库路径，默认 `data/btboy.db` |
+| `TMDB_API_KEY` | 选 | TMDB Key（申请 https://www.themoviedb.org/settings/api），推送带剧集封面 |
 
 ## 本地开发
 

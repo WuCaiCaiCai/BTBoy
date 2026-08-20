@@ -28,7 +28,8 @@ CREATE TABLE IF NOT EXISTS subscriptions (
     bgm_id INTEGER,
     last_push_at TEXT,
     last_slack_notified TEXT,
-    gap_notified TEXT DEFAULT ''
+    gap_notified TEXT DEFAULT '',
+    poster_url TEXT DEFAULT ''
 );
 CREATE TABLE IF NOT EXISTS pushed_items (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -83,6 +84,18 @@ pub fn open(path: &str) -> Result<Connection> {
 pub fn migrate(db: &Db) -> Result<()> {
     let conn = db.lock().unwrap();
     conn.execute_batch(SCHEMA)?;
+    // 旧库补齐缺失列
+    let has_poster: bool = conn
+        .query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('subscriptions') WHERE name='poster_url'",
+            [],
+            |r| r.get::<_, i64>(0),
+        )
+        .unwrap_or(0)
+        > 0;
+    if !has_poster {
+        conn.execute_batch("ALTER TABLE subscriptions ADD COLUMN poster_url TEXT DEFAULT ''")?;
+    }
     Ok(())
 }
 
@@ -152,10 +165,11 @@ fn row_to_sub(r: &rusqlite::Row) -> rusqlite::Result<SubRow> {
         last_push_at: r.get(13)?,
         last_slack_notified: r.get(14)?,
         gap_notified: r.get(15)?,
+        poster_url: r.get(16)?,
     })
 }
 
-const SUB_COLS: &str = "id, rss_url, title, start_episode, lang_pref, include_kw, exclude_kw, enabled, last_fetch_at, created_at, backup_rss_url, total_episodes, bgm_id, last_push_at, last_slack_notified, gap_notified";
+const SUB_COLS: &str = "id, rss_url, title, start_episode, lang_pref, include_kw, exclude_kw, enabled, last_fetch_at, created_at, backup_rss_url, total_episodes, bgm_id, last_push_at, last_slack_notified, gap_notified, poster_url";
 
 pub fn list_subscriptions(db: &Db) -> Result<Vec<SubRow>> {
     let conn = db.lock().unwrap();
@@ -308,6 +322,15 @@ pub fn set_sub_gap_notified(db: &Db, id: i64, sig: &str) -> Result<()> {
     conn.execute(
         "UPDATE subscriptions SET gap_notified = ?1 WHERE id = ?2",
         params![sig, id],
+    )?;
+    Ok(())
+}
+
+pub fn set_sub_poster(db: &Db, id: i64, url: Option<&str>) -> Result<()> {
+    let conn = db.lock().unwrap();
+    conn.execute(
+        "UPDATE subscriptions SET poster_url = ?1 WHERE id = ?2",
+        params![url.unwrap_or(""), id],
     )?;
     Ok(())
 }

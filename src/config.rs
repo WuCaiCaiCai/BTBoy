@@ -15,6 +15,8 @@ pub struct Config {
     pub db_path: String,
     /// 日志级别
     pub log_level: String,
+    /// TMDB API Key（可选，用于封面推送）
+    pub tmdb_api_key: Option<String>,
 }
 
 impl Config {
@@ -34,6 +36,7 @@ impl Config {
             .unwrap_or(5);
         let db_path = std::env::var("DB_PATH").unwrap_or_else(|_| "data/btboy.db".into());
         let log_level = std::env::var("RUST_LOG").unwrap_or_else(|_| "info".into());
+        let tmdb_api_key = std::env::var("TMDB_API_KEY").ok().filter(|s| !s.is_empty());
 
         Ok(Config {
             bot_token,
@@ -42,6 +45,7 @@ impl Config {
             fetch_interval_min,
             db_path,
             log_level,
+            tmdb_api_key,
         })
     }
 }

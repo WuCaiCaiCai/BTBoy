@@ -306,6 +306,43 @@ pub async fn process_subscription(state: &Arc<AppState>, sub: &SubRow) -> Result
     Ok(report)
 }
 
+/// 检查 RSS 里同一集是否存在多个不同版本/来源/简繁（用于添加订阅时的重复预览）
+/// 返回 (集数, 去重后的特征列表)
+pub(crate) fn duplicate_report(items: &[crate::models::RssItem]) -> Vec<(u32, Vec<String>)> {
+    use std::collections::BTreeMap;
+    let mut groups: BTreeMap<u32, Vec<String>> = BTreeMap::new();
+    for it in items {
+        let p = parse_title(&it.title);
+        let Some(ep) = p.episode else { continue };
+        if p.is_collection || p.is_special {
+            continue;
+        }
+        let mut parts: Vec<String> = Vec::new();
+        if let Some(s) = &p.source {
+            parts.push(s.clone());
+        }
+        if p.lang != crate::models::Lang::Unknown {
+            parts.push(p.lang.label().to_string());
+        }
+        if p.version > 1 {
+            parts.push(format!("v{}", p.version));
+        }
+        let sig = if parts.is_empty() {
+            "未知".to_string()
+        } else {
+            parts.join("·")
+        };
+        let list = groups.entry(ep).or_default();
+        if !list.contains(&sig) {
+            list.push(sig);
+        }
+    }
+    groups
+        .into_iter()
+        .filter(|(_, sigs)| sigs.len() >= 2)
+        .collect()
+}
+
 pub(crate) async fn collect_candidates(
     state: &AppState,
     sub: &SubRow,
@@ -409,21 +446,13 @@ async fn push_candidate(state: &AppState, sub: &SubRow, c: &Candidate) -> Result
     let msg = notifier::format_push(sub, c);
     match crate::resolve_channel(state) {
         Some(ch) => {
-            state
-                .bot
-                .send_message(ChatId(ch), msg)
-                .parse_mode(ParseMode::Html)
-                .await?;
+            send_with_poster(state, ChatId(ch), &msg, sub).await?;
             tracing::info!("推送 sub#{} 第{}话 -> 频道 {ch}", sub.id, fmt_episode(c.episode));
         }
         None => match crate::resolve_admin(state) {
             Some(a) => {
                 let warn = format!("⚠️ 未绑定频道，磁力发到管理员会话\n\n{msg}");
-                state
-                    .bot
-                    .send_message(ChatId(a), warn)
-                    .parse_mode(ParseMode::Html)
-                    .await?;
+                send_with_poster(state, ChatId(a), &warn, sub).await?;
             }
             None => tracing::warn!("无管理员无频道，丢弃磁力: {}", c.magnet),
         },
@@ -440,6 +469,55 @@ async fn push_candidate(state: &AppState, sub: &SubRow, c: &Candidate) -> Result
     );
     let _ = db::set_sub_last_push(&state.db, sub.id);
     Ok(())
+}
+
+/// 优先以"封面+标题+磁力"图文消息推送；无封面/失败时退回纯文本
+async fn send_with_poster(state: &AppState, chat_id: ChatId, text: &str, sub: &SubRow) -> Result<()> {
+    if let Some(bytes) = get_or_fetch_poster(state, sub).await {
+        if let Err(e) = state
+            .bot
+            .send_photo(chat_id, teloxide::types::InputFile::memory(bytes))
+            .caption(text.to_string())
+            .parse_mode(ParseMode::Html)
+            .await
+        {
+            tracing::warn!("发送封面图文失败(退回纯文本): {e}");
+            state
+                .bot
+                .send_message(chat_id, text.to_string())
+                .parse_mode(ParseMode::Html)
+                .await?;
+        }
+    } else {
+        state
+            .bot
+            .send_message(chat_id, text.to_string())
+            .parse_mode(ParseMode::Html)
+            .await?;
+    }
+    Ok(())
+}
+
+/// 取封面图片字节：优先内存缓存 → DB 已存 URL → 首次解析并入库
+async fn get_or_fetch_poster(state: &AppState, sub: &SubRow) -> Option<Vec<u8>> {
+    if let Some(b) = state.poster_cache.lock().unwrap().get(&sub.id) {
+        return Some(b.clone());
+    }
+    let api_key = state.config.tmdb_api_key.as_deref()?;
+
+    let poster_url = match sub.poster_url.as_deref() {
+        Some(u) if !u.is_empty() => Some(u.to_string()),
+        _ => {
+            let hits = crate::tmdb::search(&state.http, api_key, &sub.title).await.ok()?;
+            let first = hits.into_iter().find_map(|h| h.poster)?;
+            let _ = db::set_sub_poster(&state.db, sub.id, Some(&first));
+            Some(first)
+        }
+    };
+
+    let bytes = crate::tmdb::download_poster(&state.http, poster_url.as_deref()?).await?;
+    state.poster_cache.lock().unwrap().insert(sub.id, bytes.clone());
+    Some(bytes)
 }
 
 async fn ask_fresh(state: &AppState, sub: &SubRow, ep: u32, cands: &[Candidate]) -> Result<()> {

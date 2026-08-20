@@ -98,6 +98,7 @@ pub struct SubRow {
     pub last_push_at: Option<String>,
     pub last_slack_notified: Option<String>,
     pub gap_notified: Option<String>,
+    pub poster_url: Option<String>,
 }
 
 /// 待用户决策的冲突

@@ -9,6 +9,7 @@ mod notifier;
 mod parser;
 mod rss;
 mod scheduler;
+mod tmdb;
 
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
@@ -25,6 +26,8 @@ pub struct AppState {
     pub http: reqwest::Client,
     pub bot: Bot,
     pub started: Instant,
+    /// 订阅 id → 封面图片字节缓存
+    pub poster_cache: Arc<Mutex<std::collections::HashMap<i64, Vec<u8>>>>,
 }
 
 /// 管理员：环境变量 ADMIN_ID 优先，其次 meta（/admin 注册）
@@ -133,6 +136,7 @@ async fn main() -> anyhow::Result<()> {
         http,
         bot: bot.clone(),
         started: Instant::now(),
+        poster_cache: Arc::new(Mutex::new(std::collections::HashMap::new())),
     });
 
     // 重启后给管理员发一条启动提示
