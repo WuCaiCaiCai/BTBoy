@@ -95,12 +95,16 @@ docker build -t wucaicai/btboy:latest .
 docker push wucaicai/btboy:latest
 
 # 4.（推荐）多架构镜像：amd64 + arm64，VPS/软路由都能用
+# 前提：先注册多架构模拟器（否则 arm64 会报 exec format error），并创建 container 驱动 builder
+docker run --privileged --rm tonistiigi/binfmt --install all
+docker buildx create --name multi --driver docker-container --use
 docker buildx build --platform linux/amd64,linux/arm64 \
   -t wucaicai/btboy:latest --push .
 ```
 
 > 提示：Dockerfile 为多阶段构建，运行镜像只有几十 MB。
 > 依赖锁定在 `Cargo.lock`（含 `takecell` 兼容版本），在任何有网环境 `docker build` 即可复现。
+> 多架构 = QEMU 模拟编译，arm64 较慢（20-40 分钟）属正常；只需 amd64 时用 `docker build` 即可。
 
 ## GitHub 上传（开源）
 
