@@ -95,6 +95,44 @@ fn detect_lang(s: &str) -> Lang {
     Lang::Unknown
 }
 
+/// 片源标签识别（ABEMA / CR / Baha 等），按优先级返回第一个命中
+fn detect_source(s: &str) -> Option<String> {
+    const SOURCES: &[(&str, &str)] = &[
+        ("ABEMA", "ABEMA"),
+        ("B-GLOBAL", "B-Global"),
+        ("CRUNCHYROLL", "CR"),
+        ("NETFLIX", "Netflix"),
+        ("DISNEY\\+", "Disney+"),
+        ("U-NEXT", "U-NEXT"),
+        ("AMAZON", "Prime"),
+        ("PRIME", "Prime"),
+        ("DMM", "DMM"),
+        ("AT-X", "AT-X"),
+        ("TOKYO MX", "MX"),
+        ("BILI", "Bilibili"),
+        ("iQIYI", "iQIYI"),
+        ("KKTV", "KKTV"),
+        ("NICO", "Nico"),
+        ("Baha", "Baha"),
+        ("\\bMX\\b", "MX"),
+        ("\\bCR\\b", "CR"),
+        ("ANi", "ANi"),
+        ("Xinmao", "Xinmao"),
+        ("WEI", "WEI"),
+        ("\\bBS\\b", "BS"),
+        ("XRS", "XRS"),
+        ("SINET", "SINET"),
+        ("RCN", "RCN"),
+    ];
+    for (pat, label) in SOURCES {
+        let re = Regex::new(&format!("(?i){pat}")).unwrap();
+        if re.is_match(s) {
+            return Some(label.to_string());
+        }
+    }
+    None
+}
+
 fn normalize_quality(raw: &str) -> String {
     let upper = raw.to_uppercase();
     if upper.contains("4K") || upper.contains("2160") {
@@ -147,9 +185,8 @@ pub fn parse_title(raw: &str) -> ParsedTitle {
             quality: RE_QUALITY
                 .find(rest)
                 .map(|m| normalize_quality(m.as_str())),
-            codec: RE_CODEC
-                .find(rest)
-                .map(|m| normalize_codec(m.as_str()).to_string()),
+            codec: RE_CODEC.find(rest).map(|m| normalize_codec(m.as_str()).to_string()),
+            source: detect_source(rest),
             is_collection: true,
             is_special: RE_SPECIAL.is_match(rest),
             is_half: false,
@@ -229,6 +266,7 @@ pub fn parse_title(raw: &str) -> ParsedTitle {
     let codec = RE_CODEC
         .find(rest)
         .map(|m| normalize_codec(m.as_str()).to_string());
+    let source = detect_source(rest);
 
     ParsedTitle {
         fansub,
@@ -238,6 +276,7 @@ pub fn parse_title(raw: &str) -> ParsedTitle {
         lang: detect_lang(rest),
         quality,
         codec,
+        source,
         is_collection: false,
         is_special,
         is_half,
@@ -333,6 +372,34 @@ mod tests {
         let p = parse_title("[sub] 某番 第07话v2 (1080P 简体)");
         assert_eq!(ep(&p), Some(7));
         assert_eq!(p.version, 2);
+    }
+
+    #[test]
+    fn parse_source_abema() {
+        let p = parse_title("[黒ネズミたち] 再見菈菈 / Sayonara Lara - 07 (ABEMA 1920x1080 AVC AAC MKV)");
+        assert_eq!(ep(&p), Some(7));
+        assert_eq!(p.source.as_deref(), Some("ABEMA"));
+        assert_eq!(p.anime, "再見菈菈 / Sayonara Lara");
+    }
+
+    #[test]
+    fn parse_source_cr_and_baha() {
+        let p = parse_title("[x] 再見菈菈 / Sayonara Lara - 06 (CR 1920x1080 AVC AAC MKV)");
+        assert_eq!(p.source.as_deref(), Some("CR"));
+        let p = parse_title("[x] 再見菈菈 / Sayonara Lara - 05 (Baha 1920x1080 AVC AAC MP4)");
+        assert_eq!(p.source.as_deref(), Some("Baha"));
+    }
+
+    #[test]
+    fn parse_source_mikan() {
+        let p = parse_title("[Lilith-Raws] 败犬女主太多了！ - 07 (Baha 1080P 简中 内嵌)");
+        assert_eq!(p.source.as_deref(), Some("Baha"));
+    }
+
+    #[test]
+    fn parse_no_source() {
+        let p = parse_title("[xxx] 某番 - 03 (1080P HEVC 简中)");
+        assert_eq!(p.source, None);
     }
 
     #[test]

@@ -16,6 +16,9 @@ pub fn format_push(sub: &SubRow, c: &Candidate) -> String {
     if let Some(f) = &c.fansub {
         parts.push(f.clone());
     }
+    if let Some(s) = &c.source {
+        parts.push(s.clone());
+    }
     if let Some(q) = &c.quality {
         parts.push(q.clone());
     }
@@ -50,6 +53,9 @@ pub fn candidate_line(c: &Candidate, idx: usize) -> String {
         parts.push(format!("v{}", c.version));
     } else {
         parts.push("v1".into());
+    }
+    if let Some(s) = &c.source {
+        parts.push(s.clone());
     }
     if c.lang != "未知" {
         parts.push(c.lang.clone());

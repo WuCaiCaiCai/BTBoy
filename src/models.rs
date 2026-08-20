@@ -40,6 +40,7 @@ pub struct ParsedTitle {
     pub lang: Lang,
     pub quality: Option<String>,
     pub codec: Option<String>,
+    pub source: Option<String>,
     pub is_collection: bool,
     pub is_special: bool,
     pub is_half: bool,
@@ -53,6 +54,7 @@ pub struct RssItem {
     pub title: String,
     pub link: String,
     pub magnet: Option<String>,
+    pub enclosure_url: Option<String>,
     pub guid: String,
 }
 
@@ -67,6 +69,8 @@ pub struct Candidate {
     pub lang: String,
     pub quality: Option<String>,
     pub codec: Option<String>,
+    pub source: Option<String>,
+    pub link: String,
 }
 
 impl Candidate {

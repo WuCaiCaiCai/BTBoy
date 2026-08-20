@@ -38,9 +38,11 @@ CREATE TABLE IF NOT EXISTS pushed_items (
     lang TEXT NOT NULL DEFAULT '',
     magnet TEXT NOT NULL,
     title TEXT NOT NULL,
+    link TEXT NOT NULL DEFAULT '',
     pushed_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_pushed_magnet ON pushed_items(magnet);
+CREATE INDEX IF NOT EXISTS idx_pushed_link ON pushed_items(link);
 CREATE INDEX IF NOT EXISTS idx_pushed_sub_ep ON pushed_items(subscription_id, episode);
 CREATE TABLE IF NOT EXISTS episode_prefs (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -334,6 +336,21 @@ pub fn is_pushed(db: &Db, magnet: &str) -> Result<bool> {
     Ok(n > 0)
 }
 
+/// 按 RSS 条目标识（页面链接）去重，避免重复解析 .torrent
+pub fn is_pushed_link(db: &Db, link: &str) -> Result<bool> {
+    if link.is_empty() {
+        return Ok(false);
+    }
+    let conn = db.lock().unwrap();
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM pushed_items WHERE link = ?1",
+        params![link],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
+#[allow(clippy::too_many_arguments)]
 pub fn insert_pushed(
     db: &Db,
     sub_id: i64,
@@ -342,12 +359,13 @@ pub fn insert_pushed(
     lang: &str,
     magnet: &str,
     title: &str,
+    link: &str,
 ) -> Result<()> {
     let conn = db.lock().unwrap();
     conn.execute(
-        "INSERT INTO pushed_items (subscription_id, episode, version, lang, magnet, title, pushed_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-        params![sub_id, ep, version, lang, magnet, title, now()],
+        "INSERT INTO pushed_items (subscription_id, episode, version, lang, magnet, title, link, pushed_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+        params![sub_id, ep, version, lang, magnet, title, link, now()],
     )?;
     Ok(())
 }

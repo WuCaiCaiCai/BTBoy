@@ -1,3 +1,4 @@
+mod bencode;
 mod bot;
 mod config;
 mod db;

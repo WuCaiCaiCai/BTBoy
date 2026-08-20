@@ -214,6 +214,8 @@ async fn dispatch_command(
                                 lang: "简中".into(),
                                 quality: Some("1080P".into()),
                                 codec: None,
+                                source: None,
+                                link: String::new(),
                             };
                             state
                                 .bot

@@ -242,13 +242,13 @@ pub async fn process_subscription(state: &Arc<AppState>, sub: &SubRow) -> Result
             Vec::new()
         }
     };
-    let mut candidates = collect_candidates(state, sub, &main_items, skip_half)?;
+    let mut candidates = collect_candidates(state, sub, &main_items, skip_half).await?;
 
     // 备用 RSS：主源没产出任何新候选时兜底
     if candidates.is_empty() && !sub.backup_rss_url.is_empty() {
         match fetch_rss(&state.http, &sub.backup_rss_url).await {
             Ok(items) => {
-                candidates = collect_candidates(state, sub, &items, skip_half)?;
+                candidates = collect_candidates(state, sub, &items, skip_half).await?;
                 if !candidates.is_empty() {
                     tracing::info!("sub#{} 主源无更新，使用备用 RSS", sub.id);
                 }
@@ -305,7 +305,7 @@ pub async fn process_subscription(state: &Arc<AppState>, sub: &SubRow) -> Result
     Ok(report)
 }
 
-fn collect_candidates(
+async fn collect_candidates(
     state: &AppState,
     sub: &SubRow,
     items: &[crate::models::RssItem],
@@ -313,7 +313,6 @@ fn collect_candidates(
 ) -> Result<Vec<Candidate>> {
     let mut candidates: Vec<Candidate> = Vec::new();
     for item in items {
-        let Some(magnet) = &item.magnet else { continue };
         let p = parse_title(&item.title);
         let Some(ep) = p.episode else { continue };
         if p.is_collection || p.is_special {
@@ -328,7 +327,19 @@ fn collect_candidates(
         if !crate::filter::matches_keywords(&item.title, &sub.include_kw, &sub.exclude_kw) {
             continue;
         }
-        if db::is_pushed(&state.db, magnet)? {
+        // 已按条目标识推过（避免重复解析 .torrent）→ 跳过
+        if db::is_pushed_link(&state.db, &item.link)? {
+            continue;
+        }
+        // 该集正在等待用户选择 → 不重复解析/打扰
+        if db::pending_exists(&state.db, sub.id, ep as i64)? {
+            continue;
+        }
+        let Some(magnet) = crate::rss::resolve_magnet(&state.http, item).await else {
+            tracing::debug!("sub#{} 无法解析磁力: {}", sub.id, item.title);
+            continue;
+        };
+        if db::is_pushed(&state.db, &magnet)? {
             continue;
         }
         let pushed = db::pushed_for_episode(&state.db, sub.id, ep as i64)?;
@@ -340,13 +351,15 @@ fn collect_candidates(
         }
         candidates.push(Candidate {
             title: item.title.clone(),
-            magnet: magnet.clone(),
+            magnet,
             fansub: p.fansub,
             episode: ep,
             version: p.version,
             lang: p.lang.label().to_string(),
             quality: p.quality,
             codec: p.codec,
+            source: p.source,
+            link: item.link.clone(),
         });
     }
     Ok(candidates)
@@ -421,6 +434,7 @@ async fn push_candidate(state: &AppState, sub: &SubRow, c: &Candidate) -> Result
         &c.lang,
         &c.magnet,
         &c.title,
+        &c.link,
     );
     let _ = db::set_sub_last_push(&state.db, sub.id);
     Ok(())
@@ -436,7 +450,7 @@ async fn ask_fresh(state: &AppState, sub: &SubRow, ep: u32, cands: &[Candidate])
         .map(|(i, c)| notifier::candidate_line(c, i))
         .collect();
     let text = format!(
-        "🧐 <b>{}</b> 第{}话 发现多个版本\n{}\n\n要推送哪个？",
+        "🧐 <b>{}</b> 第{}话 发现多个来源/版本\n{}\n\n要推送哪个？",
         notifier::html_escape(&sub.title),
         fmt_episode(ep),
         lines.join("\n"),
@@ -563,6 +577,9 @@ fn candidate_attrs(c: &Candidate) -> String {
     let mut parts: Vec<String> = Vec::new();
     if let Some(f) = &c.fansub {
         parts.push(f.clone());
+    }
+    if let Some(s) = &c.source {
+        parts.push(s.clone());
     }
     if let Some(q) = &c.quality {
         parts.push(q.clone());
