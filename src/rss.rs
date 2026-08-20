@@ -65,7 +65,9 @@ pub fn parse_rss_bytes(body: &[u8]) -> Result<Vec<RssItem>> {
     Ok(items)
 }
 
-/// 解析磁力。优先用 RSS 里的 magnet；否则若 enclosure 是 .torrent 链接则下载并算 infohash。
+/// 解析磁力（通用，不依赖任何站点）：
+/// 1) RSS 里已带的 magnet（enclosure 或 description）
+/// 2) enclosure 是 .torrent 链接 → 按原链接下载，解析 info 字典算 infohash 生成 magnet
 pub async fn resolve_magnet(http: &reqwest::Client, item: &RssItem) -> Option<String> {
     if let Some(m) = &item.magnet {
         return Some(m.clone());
@@ -74,22 +76,31 @@ pub async fn resolve_magnet(http: &reqwest::Client, item: &RssItem) -> Option<St
     if !looks_like_torrent(url) {
         return None;
     }
-    match http.get(url).send().await {
-        Ok(resp) => match resp.bytes().await {
-            Ok(bytes) => match torrent_to_magnet(&bytes) {
-                Some(magnet) => Some(magnet),
-                None => {
-                    tracing::warn!("解析 .torrent 失败: {url}");
-                    None
-                }
-            },
-            Err(e) => {
-                tracing::warn!("下载 .torrent 失败 {url}: {e}");
-                None
-            }
-        },
+    download_torrent_magnet(http, url).await
+}
+
+async fn download_torrent_magnet(http: &reqwest::Client, url: &str) -> Option<String> {
+    let resp = match http.get(url).send().await {
+        Ok(r) => r,
         Err(e) => {
             tracing::warn!("下载 .torrent 失败 {url}: {e}");
+            return None;
+        }
+    };
+    let bytes = match resp.bytes().await {
+        Ok(b) => b,
+        Err(e) => {
+            tracing::warn!("下载 .torrent 失败 {url}: {e}");
+            return None;
+        }
+    };
+    match torrent_to_magnet(&bytes) {
+        Some(m) => {
+            tracing::info!("从 .torrent 解析到磁力: {m}");
+            Some(m)
+        }
+        None => {
+            tracing::warn!("解析 .torrent 失败: {url}");
             None
         }
     }
@@ -124,5 +135,12 @@ mod tests {
     #[test]
     fn invalid_torrent() {
         assert!(torrent_to_magnet(b"garbage").is_none());
+    }
+
+    #[test]
+    fn torrent_url_detected() {
+        assert!(looks_like_torrent("https://x.com/download/torrent/abc123/foo.torrent"));
+        assert!(looks_like_torrent("http://x.com/torrent/abc123"));
+        assert!(!looks_like_torrent("https://x.com/episode/123"));
     }
 }

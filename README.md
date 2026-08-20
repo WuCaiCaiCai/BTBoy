@@ -1,7 +1,10 @@
 # BTBoy 自动追番 Telegram 机器人
 
-订阅蜜柑计划（Mikan）RSS，智能解析集数 / 版本(v2) / 简繁体，按规则查重过滤，
+**通用 RSS 订阅解析器**：订阅任意 RSS（蜜柑 Mikan / bangumi.moe / 任意字幕组），按 RSS 原样解析条目，
+智能识别集数 / 版本(v2) / 简繁体 / 片源（ABEMA/CR/Baha），按规则查重过滤，
 定时把**固定格式的磁力链接**推送到你绑定的 Telegram 频道，交给下游（如 光鸭云盘 + 转发机器人）离线下载。
+
+磁力获取：RSS 里自带 magnet 直接用；若 RSS 只给 `.torrent` 文件链接，则按原链接下载、解析 info 字典算 infohash 生成 magnet（不依赖任何站点特判）。
 
 ## 功能
 
@@ -68,6 +71,16 @@ docker compose up -d
 | `/push <id>` | 立即拉取推送一次 |
 | `/test` | 发测试消息到频道 |
 | `/status` `/logs [n]` | 状态 / 日志 |
+
+## 调试：手动验证磁力解析
+
+服务器（有外网）上直接验证某条 RSS 是否能解析出磁力：
+
+```bash
+btboy resolve "https://bangumi.moe/rss/tags/xxx"
+```
+
+会逐条打印 集数·片源 / 标题 / 链接 / 磁力，磁力能出来就说明链路正常。
 
 ## Docker Hub 发布（把镜像推上去）
 

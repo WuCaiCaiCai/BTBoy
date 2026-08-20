@@ -42,8 +42,38 @@ pub fn resolve_channel(state: &AppState) -> Option<i64> {
         .or_else(|| db::meta_get(&state.db, "channel_id").and_then(|s| s.trim().parse().ok()))
 }
 
+/// 调试子命令：`btboy resolve <rss-url>` 拉取 RSS 并逐条打印解析出的磁力
+async fn debug_resolve(url: &str) -> anyhow::Result<()> {
+    let _guard = logging::init("debug")?;
+    let http = reqwest::Client::builder()
+        .user_agent("BTBoy/0.1 (https://github.com/)")
+        .build()?;
+    let items = rss::fetch_rss(&http, url).await?;
+    println!("共 {} 条:", items.len());
+    for it in &items {
+        let p = parser::parse_title(&it.title);
+        let mag = rss::resolve_magnet(&http, it).await;
+        println!(
+            "  [{:?}·{:?}] {}\n      link={}\n      enclosure={}\n      magnet = {}",
+            p.episode,
+            p.source,
+            it.title,
+            it.link,
+            it.enclosure_url.as_deref().unwrap_or("(无)"),
+            mag.as_deref().unwrap_or("(解析失败)")
+        );
+    }
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    // 调试：直接解析一个 RSS 并打印每条磁力，用于在服务端验证
+    let args: Vec<String> = std::env::args().collect();
+    if args.len() >= 3 && args[1] == "resolve" {
+        return debug_resolve(&args[2]).await;
+    }
+
     dotenvy::dotenv().ok();
     let config = config::Config::from_env()?;
     let _guard = logging::init(&config.log_level)?;
