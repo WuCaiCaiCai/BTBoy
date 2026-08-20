@@ -33,15 +33,24 @@ pub async fn run(state: Arc<AppState>) {
     let mut bgm_last_check = String::new();
     loop {
         let t0 = std::time::Instant::now();
-        if let Err(e) = process_all(&state).await {
-            tracing::error!("调度循环错误: {e}");
-        }
+        let cycle = match process_all(&state).await {
+            Ok(()) => "ok".to_string(),
+            Err(e) => {
+                tracing::error!("调度循环错误: {e}");
+                "err".to_string()
+            }
+        };
         if let Err(e) = refresh_bgm_if_due(&state, &mut bgm_last_check).await {
             tracing::error!("BGM 总集数刷新失败: {e}");
         }
         let interval_min =
             db::meta_int(&state.db, "fetch_interval_min", state.config.fetch_interval_min as i64)
                 .max(1) as u64;
+        let nsub = db::count_subscriptions(&state.db).unwrap_or(0);
+        // 心跳日志：确保 /logs 始终能看到调度器在活动
+        tracing::info!(
+            "轮询完成 [{cycle}] · 订阅 {nsub} · 间隔 {interval_min} 分钟"
+        );
         let wait = (interval_min * 60).saturating_sub(t0.elapsed().as_secs());
         sleep(Duration::from_secs(wait.max(30))).await;
     }

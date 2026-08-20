@@ -21,6 +21,11 @@ static RE_EP_SEASON: Lazy<Regex> =
 static RE_EP_DASH: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"-\s*(\d{1,3})(?:\.(\d+))?(?:\s*[vV]\s*(\d+))?").unwrap());
 
+// [07] / [07v2] / [07.5]（kisssub 等；] 紧跟数字天然排除 [1080p]/[2024]）
+static RE_EP_BRACKET: Lazy<Regex> = Lazy::new(|| {
+    Regex::new(r"\[(\d{1,3})(?:\.(\d+))?(?:\s*[vV]\s*(\d+))?\]").unwrap()
+});
+
 // 任意位置 vN 形式（含 07话v2 / 07v2），用于补版本号
 static RE_EP_VER: Lazy<Regex> =
     Lazy::new(|| Regex::new(r"(\d{1,3})\s*[话話集]?\s*[vV]\s*(\d+)").unwrap());
@@ -222,6 +227,13 @@ pub fn parse_title(raw: &str) -> ParsedTitle {
             None,
             false,
         )
+    } else if let Some(cap) = RE_EP_BRACKET.captures_iter(rest).last() {
+        // [07] / [07v2] / [07.5]（kisssub 等）
+        let m = cap.get(0).unwrap();
+        let ep = cap.get(1).and_then(|g| g.as_str().parse::<u32>().ok());
+        let version = cap.get(3).and_then(|g| g.as_str().parse::<u32>().ok());
+        let half = cap.get(2).map(|g| g.as_str() != "0").unwrap_or(false);
+        (ep, Some(m.start()), version, half)
     } else {
         let mut found = None;
         for cap in RE_EP_DASH.captures_iter(rest) {
@@ -406,5 +418,27 @@ mod tests {
     fn parse_no_episode() {
         let p = parse_title("[sub] 某番全集 (1080P)");
         assert!(p.is_collection);
+    }
+
+    #[test]
+    fn parse_bracket_episode() {
+        let p = parse_title("[MingY] 画完这个就去死 Kore Kaite Shine [07][1080p]");
+        assert_eq!(ep(&p), Some(7));
+        assert_eq!(p.anime, "画完这个就去死 Kore Kaite Shine");
+        assert_eq!(p.quality.as_deref(), Some("1080P"));
+        assert_eq!(p.fansub.as_deref(), Some("MingY"));
+    }
+
+    #[test]
+    fn parse_bracket_v2() {
+        let p = parse_title("[MingY] 番名 [07v2][1080p]");
+        assert_eq!(ep(&p), Some(7));
+        assert_eq!(p.version, 2);
+    }
+
+    #[test]
+    fn bracket_does_not_match_resolution() {
+        let p = parse_title("[MingY] 某番 (2024 BDRip 1080p HEVC)");
+        assert_eq!(ep(&p), None);
     }
 }
