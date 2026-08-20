@@ -109,7 +109,7 @@ docker buildx build --platform linux/amd64,linux/arm64 \
 ```bash
 # 1. 在 GitHub 网页新建空仓库（不要勾选 README / .gitignore，避免冲突）
 # 2. 添加远程并推送
-git remote add origin https://github.com/<你的账号>/BTBoy.git
+git remote add origin https://github.com/WuCaiCaiCai/BTBoy.git
 git branch -M main
 git push -u origin main
 ```

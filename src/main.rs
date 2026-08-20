@@ -46,7 +46,7 @@ pub fn resolve_channel(state: &AppState) -> Option<i64> {
 async fn debug_resolve(url: &str) -> anyhow::Result<()> {
     let _guard = logging::init("debug")?;
     let http = reqwest::Client::builder()
-        .user_agent("BTBoy/0.1 (https://github.com/)")
+        .user_agent("BTBoy/0.1 (https://github.com/WuCaiCaiCai/BTBoy)")
         .build()?;
     let items = rss::fetch_rss(&http, url).await?;
     println!("共 {} 条:", items.len());
@@ -83,7 +83,7 @@ async fn main() -> anyhow::Result<()> {
     db::migrate(&db)?;
 
     let http = reqwest::Client::builder()
-        .user_agent("BTBoy/0.1 (https://github.com/)")
+        .user_agent("BTBoy/0.1 (https://github.com/WuCaiCaiCai/BTBoy)")
         .build()?;
     let bot = Bot::new(&config.bot_token);
 
