@@ -37,7 +37,7 @@ docker run -d --name btboy --restart unless-stopped \
   -e TELEGRAM_BOT_TOKEN=你的Token \
   -e ADMIN_ID=你的数字ID \
   -v $PWD/data:/data \
-  你的DockerHub账号/btboy:latest
+  wucaicai/btboy:latest
 
 # 方式 B：docker compose
 cp .env.example .env   # 编辑填入 Token / ADMIN_ID
@@ -89,14 +89,14 @@ btboy resolve "https://bangumi.moe/rss/tags/xxx"
 docker login
 
 # 2. 本地构建
-docker build -t 你的DockerHub账号/btboy:latest .
+docker build -t wucaicai/btboy:latest .
 
 # 3. 推送
-docker push 你的DockerHub账号/btboy:latest
+docker push wucaicai/btboy:latest
 
 # 4.（推荐）多架构镜像：amd64 + arm64，VPS/软路由都能用
 docker buildx build --platform linux/amd64,linux/arm64 \
-  -t 你的DockerHub账号/btboy:latest --push .
+  -t wucaicai/btboy:latest --push .
 ```
 
 > 提示：Dockerfile 为多阶段构建，运行镜像只有几十 MB。

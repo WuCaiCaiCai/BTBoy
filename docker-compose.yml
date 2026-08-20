@@ -1,6 +1,6 @@
 services:
   btboy:
-    image: 你的DockerHub账号/btboy:latest
+    image: wucaicai/btboy:latest
     container_name: btboy
     restart: unless-stopped
     environment:
