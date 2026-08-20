@@ -1562,14 +1562,19 @@ async fn show_push_dialog(bot: &Bot, state: &Arc<AppState>, chat_id: i64) -> Res
 async fn handle_pick_cmd(bot: &Bot, state: &Arc<AppState>, uid: i64, rest: &str) -> Result<()> {
     let mut it = rest.splitn(2, ':');
     let cmd = it.next().unwrap_or("");
-    let id: i64 = it.next().and_then(|s| s.parse().ok()).unwrap_or(0);
+    // 选择器按钮带的是"序号"(列表位置)，先换算成真实 id
+    let idx: i64 = it.next().and_then(|s| s.parse().ok()).unwrap_or(0);
+    let Some(id) = db::resolve_sub_by_index(&state.db, idx)? else {
+        send(bot, uid, format!("未找到订阅 #{idx}"), None).await?;
+        return Ok(());
+    };
     match cmd {
         "push" => {
             if let Some(s) = db::get_subscription(&state.db, id)? {
                 match crate::scheduler::process_subscription(state, &s).await {
-                    Ok(r) => send(bot, uid, push_result_text(id, &r), None).await?,
+                    Ok(r) => send(bot, uid, push_result_text(idx, &r), None).await?,
                     Err(e) => {
-                        send(bot, uid, format!("❌ #{id} 拉取失败: {e}"), None).await?
+                        send(bot, uid, format!("❌ #{idx} 拉取失败: {e}"), None).await?
                     }
                 }
             }
@@ -1588,18 +1593,18 @@ async fn handle_pick_cmd(bot: &Bot, state: &Arc<AppState>, uid: i64, rest: &str)
                 send(
                     bot,
                     uid,
-                    format!("确认删除订阅 <b>{}</b> (#{id})?", html_escape(&s.title)),
+                    format!("确认删除订阅 <b>{}</b> (#{idx})?", html_escape(&s.title)),
                     Some(kb),
                 )
                 .await?;
             }
         }
         "edit" => {
-            send(bot, uid, format!("编辑订阅 <b>#{id}</b>"), Some(edit_kb(id))).await?;
+            send(bot, uid, format!("编辑订阅 <b>#{idx}</b>"), Some(edit_kb(id))).await?;
         }
         "rmbackup" => {
             db::set_sub_backup(&state.db, id, None)?;
-            send(bot, uid, format!("✅ #{id} 备用 RSS 已移除"), None).await?;
+            send(bot, uid, format!("✅ #{idx} 备用 RSS 已移除"), None).await?;
         }
         "total" | "bgm" | "backup" => {
             let spec = flow_fields(cmd).unwrap();

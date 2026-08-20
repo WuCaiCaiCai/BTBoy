@@ -129,6 +129,24 @@ fn sha1_digest(bytes: &[u8]) -> String {
         .collect()
 }
 
+#[test]
+fn index_mapping_survives_deletion() {
+    let state = test_state();
+    let a = db::add_subscription(&state.db, "http://a", "番A").unwrap();
+    let b = db::add_subscription(&state.db, "http://b", "番B").unwrap();
+    let c = db::add_subscription(&state.db, "http://c", "番C").unwrap();
+    assert_eq!(db::resolve_sub_by_index(&state.db, 1).unwrap(), Some(a));
+    assert_eq!(db::resolve_sub_by_index(&state.db, 2).unwrap(), Some(b));
+    assert_eq!(db::resolve_sub_by_index(&state.db, 3).unwrap(), Some(c));
+    assert_eq!(db::resolve_sub_by_index(&state.db, 4).unwrap(), None);
+
+    // 删除第 1 个(序号1)后，序号重排：原 b 变 1，原 c 变 2
+    db::delete_subscription(&state.db, a).unwrap();
+    assert_eq!(db::resolve_sub_by_index(&state.db, 1).unwrap(), Some(b));
+    assert_eq!(db::resolve_sub_by_index(&state.db, 2).unwrap(), Some(c));
+    assert_eq!(db::resolve_sub_by_index(&state.db, 3).unwrap(), None);
+}
+
 // 让 unused 警告不出现：Candidate 在测试里用到即消除，若未用到则此辅助仅作占位
 #[allow(dead_code)]
 fn _touch(c: Candidate) {
