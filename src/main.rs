@@ -14,7 +14,7 @@ use std::sync::{Arc, Mutex};
 use std::time::Instant;
 
 use teloxide::prelude::*;
-use teloxide::types::BotCommand;
+use teloxide::types::{BotCommand, ChatId};
 
 #[cfg(test)]
 mod tests;
@@ -53,7 +53,7 @@ async fn debug_resolve(url: &str) -> anyhow::Result<()> {
     println!("共 {} 条:", items.len());
     for it in &items {
         let p = parser::parse_title(&it.title);
-        let mag = rss::resolve_magnet(&http, it).await;
+        let mag = rss::resolve_magnet(&http, it, url).await;
         println!(
             "  [{:?}·{:?}] {}\n      link={}\n      enclosure={}\n      magnet = {}",
             p.episode,
@@ -134,6 +134,13 @@ async fn main() -> anyhow::Result<()> {
         bot: bot.clone(),
         started: Instant::now(),
     });
+
+    // 重启后给管理员发一条启动提示
+    if let Some(admin) = crate::resolve_admin(&state) {
+        let _ = bot
+            .send_message(ChatId(admin), "🟢 BTBoy 已启动，开始自动追更")
+            .await;
+    }
 
     let sched_state = state.clone();
     let scheduler_handle = tokio::spawn(async move {

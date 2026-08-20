@@ -99,17 +99,27 @@ async fn dispatch_command(
         }
 
         "sub" => {
-            let url = args.first().map(|s| s.as_str()).unwrap_or("");
-            if url.is_empty() || !url.starts_with("http") {
+            if let Some(url) = args.first() {
+                if url.starts_with("http") {
+                    start_sub_flow(bot, state, chat_id, url).await?;
+                } else {
+                    send(
+                        bot,
+                        chat_id,
+                        "❌ 链接格式不对，请输入以 http 开头的 RSS 链接",
+                        None,
+                    )
+                    .await?;
+                }
+            } else {
+                db::conv_set(&state.db, chat_id, r#"{"step":"await_sub_url"}"#)?;
                 send(
                     bot,
                     chat_id,
-                    "用法: /sub <蜜柑RSS链接>\n例如 /sub https://mikanani.me/RSS/xxxxxx",
+                    "🔗 请发送你想订阅的 RSS 链接（/cancel 取消）",
                     None,
                 )
                 .await?;
-            } else {
-                start_sub_flow(bot, state, chat_id, url).await?;
             }
         }
 
@@ -626,6 +636,21 @@ async fn handle_conversation_text(
         "flow" => {
             let input = msg.text().unwrap_or("").to_string();
             return handle_flow_text(bot, state, chat_id, &v, &input).await;
+        }
+        "await_sub_url" => {
+            let url = msg.text().unwrap_or("").trim().to_string();
+            if url.starts_with("http") {
+                db::conv_clear(&state.db, chat_id)?;
+                start_sub_flow(bot, state, chat_id, &url).await?;
+            } else {
+                send(
+                    bot,
+                    chat_id,
+                    "❌ 链接格式不对，请输入以 http 开头的 RSS 链接（/cancel 取消）",
+                    None,
+                )
+                .await?;
+            }
         }
         "await_sub_confirm" => {
             send(bot, chat_id, "请点击上方按钮确认，或 /cancel 取消", None).await?;

@@ -90,7 +90,9 @@ async fn pipeline_detects_3_sources_and_asks() {
         it.magnet = Some(format!("magnet:?xt=urn:btih:{hash}"));
     }
 
-    let candidates = scheduler::collect_candidates(&state, &sub, &items, false).await.unwrap();
+    let candidates = scheduler::collect_candidates(&state, &sub, &items, false, "http://test/feed")
+        .await
+        .unwrap();
     assert_eq!(candidates.len(), 3);
     let mut sources: Vec<&str> = candidates.iter().map(|c| c.source.as_deref().unwrap()).collect();
     sources.sort();

@@ -243,13 +243,13 @@ pub async fn process_subscription(state: &Arc<AppState>, sub: &SubRow) -> Result
             Vec::new()
         }
     };
-    let mut candidates = collect_candidates(state, sub, &main_items, skip_half).await?;
+    let mut candidates = collect_candidates(state, sub, &main_items, skip_half, &sub.rss_url).await?;
 
     // 备用 RSS：主源没产出任何新候选时兜底
     if candidates.is_empty() && !sub.backup_rss_url.is_empty() {
         match fetch_rss(&state.http, &sub.backup_rss_url).await {
             Ok(items) => {
-                candidates = collect_candidates(state, sub, &items, skip_half).await?;
+                candidates = collect_candidates(state, sub, &items, skip_half, &sub.backup_rss_url).await?;
                 if !candidates.is_empty() {
                     tracing::info!("sub#{} 主源无更新，使用备用 RSS", sub.id);
                 }
@@ -311,6 +311,7 @@ pub(crate) async fn collect_candidates(
     sub: &SubRow,
     items: &[crate::models::RssItem],
     skip_half: bool,
+    feed_url: &str,
 ) -> Result<Vec<Candidate>> {
     let mut candidates: Vec<Candidate> = Vec::new();
     for item in items {
@@ -336,7 +337,7 @@ pub(crate) async fn collect_candidates(
         if db::pending_exists(&state.db, sub.id, ep as i64)? {
             continue;
         }
-        let Some(magnet) = crate::rss::resolve_magnet(&state.http, item).await else {
+        let Some(magnet) = crate::rss::resolve_magnet(&state.http, item, feed_url).await else {
             tracing::debug!("sub#{} 无法解析磁力: {}", sub.id, item.title);
             continue;
         };

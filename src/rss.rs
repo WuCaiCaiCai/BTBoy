@@ -67,8 +67,13 @@ pub fn parse_rss_bytes(body: &[u8]) -> Result<Vec<RssItem>> {
 
 /// 解析磁力（通用，不依赖任何站点）：
 /// 1) RSS 里已带的 magnet（enclosure 或 description）
-/// 2) enclosure 是 .torrent 链接 → 按原链接下载，解析 info 字典算 infohash 生成 magnet
-pub async fn resolve_magnet(http: &reqwest::Client, item: &RssItem) -> Option<String> {
+/// 2) enclosure 是 .torrent 链接 → 按原链接下载解析 infohash；
+///    若原链接主机连不上，自动换成 RSS 源服务器的主机重试（通用镜像兜底，如 rin.pr.com → bangumi.moe）
+pub async fn resolve_magnet(
+    http: &reqwest::Client,
+    item: &RssItem,
+    feed_url: &str,
+) -> Option<String> {
     if let Some(m) = &item.magnet {
         return Some(m.clone());
     }
@@ -76,7 +81,32 @@ pub async fn resolve_magnet(http: &reqwest::Client, item: &RssItem) -> Option<St
     if !looks_like_torrent(url) {
         return None;
     }
-    download_torrent_magnet(http, url).await
+    for candidate in torrent_download_candidates(url, feed_url) {
+        if let Some(m) = download_torrent_magnet(http, &candidate).await {
+            return Some(m);
+        }
+    }
+    None
+}
+
+/// .torrent 下载候选：原链接优先；原链接主机与 RSS 源主机不同则追加"换主机"候选
+fn torrent_download_candidates(url: &str, feed_url: &str) -> Vec<String> {
+    let mut out = vec![url.to_string()];
+    let (Ok(u), Ok(f)) = (url::Url::parse(url), url::Url::parse(feed_url)) else {
+        return out;
+    };
+    if u.host_str() != f.host_str() {
+        if let Some(f_host) = f.host_str() {
+            let mut alt = u.clone();
+            let _ = alt.set_scheme(f.scheme());
+            let _ = alt.set_host(Some(f_host));
+            if alt.as_str() != url {
+                tracing::debug!("镜像兜底尝试: {url} -> {alt}");
+                out.push(alt.to_string());
+            }
+        }
+    }
+    out
 }
 
 async fn download_torrent_magnet(http: &reqwest::Client, url: &str) -> Option<String> {
