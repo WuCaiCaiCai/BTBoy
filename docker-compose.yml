@@ -1,0 +1,19 @@
+services:
+  btboy:
+    image: 你的DockerHub账号/btboy:latest
+    container_name: btboy
+    restart: unless-stopped
+    environment:
+      # 必填：BotFather 获取的机器人令牌
+      TELEGRAM_BOT_TOKEN: "123456789:AAEexampleYourBotFatherToken"
+      # 必填：你的 Telegram 数字 ID（@userinfobot 获取）
+      ADMIN_ID: "123456789"
+      # 可选：全局推送频道 ID（也可用 /bind 转发一条频道消息自动绑定）
+      CHANNEL_ID: ""
+      # 可选：轮询间隔分钟（默认 5，可用 /interval 动态改）
+      FETCH_INTERVAL_MIN: "5"
+      # 可选：日志级别
+      RUST_LOG: "info"
+    volumes:
+      - ./data:/data
+    # 默认端口不需要暴露（Telegram 长轮询出站）

@@ -1,0 +1,13 @@
+target
+data
+logs
+.env
+*.db
+*.db-shm
+*.db-wal
+.git
+.gitignore
+.github
+Dockerfile
+docker-compose.yml
+README.md
