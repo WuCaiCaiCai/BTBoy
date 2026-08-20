@@ -130,5 +130,3 @@ fn sha1_digest(bytes: &[u8]) -> String {
 fn _touch(c: Candidate) {
     let _ = c.link;
 }
-
-

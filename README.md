@@ -102,6 +102,54 @@ docker buildx build --platform linux/amd64,linux/arm64 \
 > 提示：Dockerfile 为多阶段构建，运行镜像只有几十 MB。
 > 依赖锁定在 `Cargo.lock`（含 `takecell` 兼容版本），在任何有网环境 `docker build` 即可复现。
 
+## GitHub 上传（开源）
+
+仓库已初始化并提交，只需推到 GitHub：
+
+```bash
+# 1. 在 GitHub 网页新建空仓库（不要勾选 README / .gitignore，避免冲突）
+# 2. 添加远程并推送
+git remote add origin https://github.com/<你的账号>/BTBoy.git
+git branch -M main
+git push -u origin main
+```
+
+> ⚠️ **隐私提醒**：当前 git 提交作者是真实姓名 + QQ 邮箱，推到公开仓库会永久暴露。
+> 推送前建议改成 GitHub 匿名邮箱（在 GitHub → Settings → Emails 查看你的
+> `xxxx+username@users.noreply.github.com`）：
+>
+> ```bash
+> # 一次性重写全部历史提交的作者
+> git filter-branch -f --env-filter '
+> export GIT_AUTHOR_NAME="你的GitHub用户名"
+> export GIT_AUTHOR_EMAIL="你的noreply邮箱"
+> export GIT_COMMITTER_NAME="你的GitHub用户名"
+> export GIT_COMMITTER_EMAIL="你的noreply邮箱"
+> ' -- --all
+>
+> # 以后的新提交也用匿名邮箱
+> git config user.name "你的GitHub用户名"
+> git config user.email "你的noreply邮箱"
+> ```
+> 仓库还没推到远端，重写历史是安全的；推出去之后就不能改了。
+
+## 部署到自己的机器
+
+### 方式一：Docker（推荐，服务器 / VPS / 软路由）
+
+见上方「快速开始」。数据都在 `./data` 目录（SQLite + 日志），`docker compose up -d` 即可，重启容器数据不丢。
+
+### 方式二：直接跑二进制（有 Rust 环境的开发机）
+
+```bash
+cargo build --release
+# 前台跑（Ctrl+C 退出）
+TELEGRAM_BOT_TOKEN=你的Token ADMIN_ID=你的ID ./target/release/btboy
+# 或后台跑
+nohup env TELEGRAM_BOT_TOKEN=你的Token ADMIN_ID=你的ID \
+  ./target/release/btboy >/dev/null 2>&1 &
+```
+
 ## 本地开发
 
 ```bash
