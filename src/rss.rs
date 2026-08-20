@@ -81,10 +81,16 @@ pub async fn resolve_magnet(
     if !looks_like_torrent(url) {
         return None;
     }
-    for candidate in torrent_download_candidates(url, feed_url) {
+    let candidates = torrent_download_candidates(url, feed_url);
+    let mut last = None;
+    for candidate in candidates {
         if let Some(m) = download_torrent_magnet(http, &candidate).await {
             return Some(m);
         }
+        last = Some(candidate);
+    }
+    if let Some(u) = last {
+        tracing::warn!("所有 .torrent 下载均失败（最后尝试 {u}）");
     }
     None
 }
@@ -113,14 +119,14 @@ async fn download_torrent_magnet(http: &reqwest::Client, url: &str) -> Option<St
     let resp = match http.get(url).send().await {
         Ok(r) => r,
         Err(e) => {
-            tracing::warn!("下载 .torrent 失败 {url}: {e}");
+            tracing::debug!("下载 .torrent 失败(尝试 {url}): {e}");
             return None;
         }
     };
     let bytes = match resp.bytes().await {
         Ok(b) => b,
         Err(e) => {
-            tracing::warn!("下载 .torrent 失败 {url}: {e}");
+            tracing::debug!("下载 .torrent 失败(尝试 {url}): {e}");
             return None;
         }
     };
@@ -130,7 +136,7 @@ async fn download_torrent_magnet(http: &reqwest::Client, url: &str) -> Option<St
             Some(m)
         }
         None => {
-            tracing::warn!("解析 .torrent 失败: {url}");
+            tracing::debug!("解析 .torrent 失败: {url}");
             None
         }
     }
