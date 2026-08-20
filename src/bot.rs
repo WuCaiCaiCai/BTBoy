@@ -88,8 +88,10 @@ async fn dispatch_command(
                 send(
                     bot,
                     chat_id,
-                    "📣 请<b>转发一条来自目标频道</b>的消息给我（先把机器人加为该频道管理员），\
-                     或直接发 /bind <频道ID>",
+                    "📣 绑定推送频道（机器人需已是该频道管理员）：\n\
+                     ① <b>转发一条</b>来自该频道的消息给我\n\
+                     ② 或直接<b>输入频道ID</b>\n\
+                     /cancel 取消",
                     None,
                 )
                 .await?;
@@ -142,60 +144,72 @@ async fn dispatch_command(
         }
 
         "show" => {
-            let id: i64 = args.first().and_then(|s| s.parse().ok()).unwrap_or(0);
-            match db::get_subscription(&state.db, id)? {
-                Some(s) => send(bot, chat_id, sub_detail(&s), None).await?,
-                None => send(bot, chat_id, format!("未找到订阅 #{id}"), None).await?,
+            if let Some(id) = args.first().and_then(|s| s.parse::<i64>().ok()) {
+                match db::get_subscription(&state.db, id)? {
+                    Some(s) => send(bot, chat_id, sub_detail(&s), None).await?,
+                    None => send(bot, chat_id, format!("未找到订阅 #{id}"), None).await?,
+                }
+            } else {
+                show_sub_picker(bot, state, chat_id, "show").await?;
             }
         }
 
         "edit" => {
-            let id: i64 = args.first().and_then(|s| s.parse().ok()).unwrap_or(0);
-            if db::get_subscription(&state.db, id)?.is_none() {
-                send(bot, chat_id, format!("未找到订阅 #{id}"), None).await?;
+            if let Some(id) = args.first().and_then(|s| s.parse::<i64>().ok()) {
+                if db::get_subscription(&state.db, id)?.is_none() {
+                    send(bot, chat_id, format!("未找到订阅 #{id}"), None).await?;
+                } else {
+                    let kb = edit_kb(id);
+                    send(bot, chat_id, format!("编辑订阅 <b>#{id}</b>"), Some(kb)).await?;
+                }
             } else {
-                let kb = edit_kb(id);
-                send(bot, chat_id, format!("编辑订阅 <b>#{id}</b>"), Some(kb)).await?;
+                show_sub_picker(bot, state, chat_id, "edit").await?;
             }
         }
 
         "del" => {
-            let id: i64 = args.first().and_then(|s| s.parse().ok()).unwrap_or(0);
-            match db::get_subscription(&state.db, id)? {
-                Some(s) => {
-                    let kb = InlineKeyboardMarkup::new(vec![vec![
-                        InlineKeyboardButton::callback("确认删除", format!("delc:{id}:yes")),
-                        InlineKeyboardButton::callback("取消", format!("delc:{id}:no")),
-                    ]]);
-                    send(
-                        bot,
-                        chat_id,
-                        format!("确认删除订阅 <b>{}</b> (#{id})?", html_escape(&s.title)),
-                        Some(kb),
-                    )
-                    .await?;
+            if let Some(id) = args.first().and_then(|s| s.parse::<i64>().ok()) {
+                match db::get_subscription(&state.db, id)? {
+                    Some(s) => {
+                        let kb = InlineKeyboardMarkup::new(vec![vec![
+                            InlineKeyboardButton::callback("确认删除", format!("delc:{id}:yes")),
+                            InlineKeyboardButton::callback("取消", format!("delc:{id}:no")),
+                        ]]);
+                        send(
+                            bot,
+                            chat_id,
+                            format!("确认删除订阅 <b>{}</b> (#{id})?", html_escape(&s.title)),
+                            Some(kb),
+                        )
+                        .await?;
+                    }
+                    None => send(bot, chat_id, format!("未找到订阅 #{id}"), None).await?,
                 }
-                None => send(bot, chat_id, format!("未找到订阅 #{id}"), None).await?,
+            } else {
+                show_sub_picker(bot, state, chat_id, "del").await?;
             }
         }
 
         "push" => {
-            let id: i64 = args.first().and_then(|s| s.parse().ok()).unwrap_or(0);
-            match db::get_subscription(&state.db, id)? {
-                Some(s) => {
-                    let r = crate::scheduler::process_subscription(state, &s).await?;
-                    send(
-                        bot,
-                        chat_id,
-                        format!(
-                            "✅ #{id} 拉取完成: 新候选 {} · 推送 {} · 询问 {}",
-                            r.new, r.pushed, r.asked
-                        ),
-                        None,
-                    )
-                    .await?;
+            if let Some(id) = args.first().and_then(|s| s.parse::<i64>().ok()) {
+                match db::get_subscription(&state.db, id)? {
+                    Some(s) => {
+                        let r = crate::scheduler::process_subscription(state, &s).await?;
+                        send(
+                            bot,
+                            chat_id,
+                            format!(
+                                "✅ #{id} 拉取完成: 新候选 {} · 推送 {} · 询问 {}",
+                                r.new, r.pushed, r.asked
+                            ),
+                            None,
+                        )
+                        .await?;
+                    }
+                    None => send(bot, chat_id, format!("未找到订阅 #{id}"), None).await?,
                 }
-                None => send(bot, chat_id, format!("未找到订阅 #{id}"), None).await?,
+            } else {
+                show_push_dialog(bot, state, chat_id).await?;
             }
         }
 
@@ -305,12 +319,16 @@ async fn dispatch_command(
         }
 
         "interval" => {
-            let n: u64 = args.first()
-                .and_then(|s| s.parse().ok())
-                .filter(|n| *n >= 1 && *n <= 1440)
-                .unwrap_or(5);
-            db::meta_set(&state.db, "fetch_interval_min", &n.to_string())?;
-            send(bot, chat_id, format!("✅ 轮询间隔设为 {n} 分钟"), None).await?;
+            if let Some(n) = args
+                .first()
+                .and_then(|s| s.parse::<u64>().ok())
+                .filter(|n| (1..=1440).contains(n))
+            {
+                db::meta_set(&state.db, "fetch_interval_min", &n.to_string())?;
+                send(bot, chat_id, format!("✅ 轮询间隔设为 {n} 分钟"), None).await?;
+            } else {
+                start_flow(bot, state, chat_id, "interval").await?;
+            }
         }
 
         "skiphalf" => {
@@ -326,15 +344,19 @@ async fn dispatch_command(
         }
 
         "slack" => {
-            let days = match args.first().map(|s| s.as_str()) {
-                Some("off") | Some("0") | None => 0,
-                Some(s) => s.parse::<i64>().unwrap_or(0),
-            };
-            db::meta_set(&state.db, "slack_days", &days.to_string())?;
-            if days > 0 {
-                send(bot, chat_id, format!("✅ 摸鱼检测: {days} 天没更新会通知"), None).await?;
+            if let Some(raw) = args.first() {
+                let days = match raw.as_str() {
+                    "off" | "0" => 0,
+                    s => s.parse::<i64>().unwrap_or(0),
+                };
+                db::meta_set(&state.db, "slack_days", &days.to_string())?;
+                if days > 0 {
+                    send(bot, chat_id, format!("✅ 摸鱼检测: {days} 天没更新会通知"), None).await?;
+                } else {
+                    send(bot, chat_id, "✅ 摸鱼检测已关闭", None).await?;
+                }
             } else {
-                send(bot, chat_id, "✅ 摸鱼检测已关闭", None).await?;
+                start_flow(bot, state, chat_id, "slack").await?;
             }
         }
 
@@ -352,50 +374,54 @@ async fn dispatch_command(
 
         // ---- 订阅级 ----
         "total" => {
-            let (id, n) = (args.first().and_then(|s| s.parse().ok()), args.get(1).and_then(|s| s.parse().ok()));
-            let (Some(id), Some(n)) = (id, n) else {
-                send(bot, chat_id, "用法: /total <订阅ID> <总集数>", None).await?;
-                return Ok(());
-            };
-            db::set_sub_total(&state.db, id, Some(n))?;
-            send(bot, chat_id, format!("✅ #{id} 总集数设为 {n}"), None).await?;
+            let id = args.first().and_then(|s| s.parse::<i64>().ok());
+            let n = args.get(1).and_then(|s| s.parse::<i64>().ok());
+            match (id, n) {
+                (Some(id), Some(n)) => {
+                    db::set_sub_total(&state.db, id, Some(n))?;
+                    send(bot, chat_id, format!("✅ #{id} 总集数设为 {n}"), None).await?;
+                }
+                _ => show_sub_picker(bot, state, chat_id, "total").await?,
+            }
         }
 
         "bgm" => {
-            let (id, bgm) = (args.first().and_then(|s| s.parse().ok()), args.get(1).and_then(|s| s.parse().ok()));
-            let (Some(id), Some(bgm)) = (id, bgm) else {
-                send(bot, chat_id, "用法: /bgm <订阅ID> <Bangumi主题ID>\n可在 bgm.tv 番剧详情页 URL 里找到 ID", None).await?;
-                return Ok(());
-            };
-            db::set_sub_bgm(&state.db, id, Some(bgm))?;
-            match crate::scheduler::fetch_bgm_total(&state.http, bgm).await {
-                Ok(Some(total)) => {
-                    db::set_sub_total(&state.db, id, Some(total))?;
-                    send(bot, chat_id, format!("✅ #{id} 绑定 BGM {bgm}，总集数 {total}"), None).await?;
+            let id = args.first().and_then(|s| s.parse::<i64>().ok());
+            let bgm = args.get(1).and_then(|s| s.parse::<i64>().ok());
+            match (id, bgm) {
+                (Some(id), Some(bgm)) => {
+                    db::set_sub_bgm(&state.db, id, Some(bgm))?;
+                    match crate::scheduler::fetch_bgm_total(&state.http, bgm).await {
+                        Ok(Some(total)) => {
+                            db::set_sub_total(&state.db, id, Some(total))?;
+                            send(bot, chat_id, format!("✅ #{id} 绑定 BGM {bgm}，总集数 {total}"), None).await?;
+                        }
+                        _ => send(bot, chat_id, format!("✅ #{id} 已绑定 BGM {bgm}（暂时取不到总集数，稍后会自动刷新）"), None).await?,
+                    }
                 }
-                _ => send(bot, chat_id, format!("✅ #{id} 已绑定 BGM {bgm}（暂时取不到总集数，稍后会自动刷新）"), None).await?,
+                _ => show_sub_picker(bot, state, chat_id, "bgm").await?,
             }
         }
 
         "backup" => {
-            let id: Option<i64> = args.first().and_then(|s| s.parse().ok());
-            let url = args.get(1).map(|s| s.as_str()).unwrap_or("");
-            let Some(id) = id else {
-                send(bot, chat_id, "用法: /backup <订阅ID> <备用RSS链接>", None).await?;
-                return Ok(());
-            };
-            if url.is_empty() || !url.starts_with("http") {
-                send(bot, chat_id, "用法: /backup <订阅ID> <备用RSS链接>", None).await?;
-                return Ok(());
+            let id = args.first().and_then(|s| s.parse::<i64>().ok());
+            let url = args.get(1).map(|s| s.as_str());
+            match (id, url) {
+                (Some(id), Some(url)) if url.starts_with("http") => {
+                    db::set_sub_backup(&state.db, id, Some(url))?;
+                    send(bot, chat_id, format!("✅ #{id} 备用 RSS 已设置"), None).await?;
+                }
+                _ => show_sub_picker(bot, state, chat_id, "backup").await?,
             }
-            db::set_sub_backup(&state.db, id, Some(url))?;
-            send(bot, chat_id, format!("✅ #{id} 备用 RSS 已设置"), None).await?;
         }
 
         "rmbackup" => {
-            let id: i64 = args.first().and_then(|s| s.parse().ok()).unwrap_or(0);
-            db::set_sub_backup(&state.db, id, None)?;
-            send(bot, chat_id, format!("✅ #{id} 备用 RSS 已移除"), None).await?;
+            if let Some(id) = args.first().and_then(|s| s.parse::<i64>().ok()) {
+                db::set_sub_backup(&state.db, id, None)?;
+                send(bot, chat_id, format!("✅ #{id} 备用 RSS 已移除"), None).await?;
+            } else {
+                show_sub_picker(bot, state, chat_id, "rmbackup").await?;
+            }
         }
 
         _ => send(bot, chat_id, "未知命令，发送 /help 查看帮助", None).await?,
@@ -570,6 +596,16 @@ async fn handle_conversation_text(
     let step = v.get("step").and_then(|s| s.as_str()).unwrap_or("");
     match step {
         "await_channel" => {
+            // 直接输入频道ID
+            if let Some(t) = msg.text() {
+                if let Ok(ch) = t.trim().parse::<i64>() {
+                    db::meta_set(&state.db, "channel_id", &ch.to_string())?;
+                    db::conv_clear(&state.db, chat_id)?;
+                    send(bot, chat_id, format!("✅ 已绑定频道 <b>{ch}</b>"), None).await?;
+                    return Ok(());
+                }
+            }
+            // 或转发一条该频道的消息
             if let Some(teloxide::types::MessageOrigin::Channel { chat, .. }) =
                 msg.forward_origin()
             {
@@ -579,7 +615,17 @@ async fn handle_conversation_text(
                 send(bot, chat_id, format!("✅ 已绑定频道 <b>{ch}</b>"), None).await?;
                 return Ok(());
             }
-            send(bot, chat_id, "请<b>转发一条来自目标频道</b>的消息，或 /cancel 取消", None).await?;
+            send(
+                bot,
+                chat_id,
+                "未识别到频道。请<b>转发一条该频道的消息</b>，或<b>直接输入频道ID</b>，或 /cancel 取消",
+                None,
+            )
+            .await?;
+        }
+        "flow" => {
+            let input = msg.text().unwrap_or("").to_string();
+            return handle_flow_text(bot, state, chat_id, &v, &input).await;
         }
         "await_sub_confirm" => {
             send(bot, chat_id, "请点击上方按钮确认，或 /cancel 取消", None).await?;
@@ -674,6 +720,23 @@ pub async fn handle_callback(bot: Bot, q: CallbackQuery, state: Arc<AppState>) -
     let r = match prefix {
         "pick" | "pickall" | "skip" | "later" | "add" | "noadd" => {
             crate::scheduler::handle_decision(&bot, &state, &data).await
+        }
+        "pickcmd" => handle_pick_cmd(&bot, &state, uid, rest).await,
+        "pushall" => {
+            let res: anyhow::Result<()> = async {
+                crate::scheduler::process_all(&state).await?;
+                let n = db::count_subscriptions(&state.db)?;
+                send(
+                    &bot,
+                    uid,
+                    format!("⚡ 已触发全部拉取（{n} 个订阅），明细见 /logs"),
+                    None,
+                )
+                .await?;
+                Ok(())
+            }
+            .await;
+            res
         }
         "subc" => handle_sub_confirm(&bot, &state, uid, rest).await,
         "sublang" => handle_sub_lang(&bot, &state, uid, rest).await,
@@ -848,6 +911,266 @@ async fn handle_del_confirm(bot: &Bot, state: &Arc<AppState>, uid: i64, rest: &s
         send(bot, uid, format!("🗑️ 已删除订阅 #{sub_id}"), None).await?;
     } else {
         send(bot, uid, "已取消", None).await?;
+    }
+    Ok(())
+}
+
+// ===================== 交互式参数引导 =====================
+
+/// 需要逐项收集参数的命令: (命令, [(字段, 提示)])
+fn flow_fields(cmd: &str) -> Option<&'static [(&'static str, &'static str)]> {
+    match cmd {
+        "interval" => Some(&[("n", "轮询间隔（分钟，1-1440）？")]),
+        "slack" => Some(&[("days", "摸鱼检测天数（填 off 关闭）？")]),
+        "total" => Some(&[("id", "订阅ID？"), ("n", "总集数？")]),
+        "bgm" => Some(&[("id", "订阅ID？"), ("bgm", "Bangumi 主题 ID？（bgm.tv 详情页 URL 里的数字）")]),
+        "backup" => Some(&[("id", "订阅ID？"), ("url", "备用 RSS 链接？")]),
+        _ => None,
+    }
+}
+
+async fn start_flow(bot: &Bot, state: &Arc<AppState>, chat_id: i64, cmd: &str) -> Result<()> {
+    let spec = flow_fields(cmd).unwrap();
+    let data = json!({"step":"flow","cmd":cmd,"next":0,"fields":{}}).to_string();
+    db::conv_set(&state.db, chat_id, &data)?;
+    let (label, prompt) = spec[0];
+    send(bot, chat_id, format!("⚙️ {label}\n{prompt}（/cancel 取消）"), None).await?;
+    Ok(())
+}
+
+async fn handle_flow_text(
+    bot: &Bot,
+    state: &Arc<AppState>,
+    chat_id: i64,
+    v: &serde_json::Value,
+    input: &str,
+) -> Result<()> {
+    let cmd = v["cmd"].as_str().unwrap_or("").to_string();
+    let next = v["next"].as_u64().unwrap_or(0) as usize;
+    let mut fields: serde_json::Map<String, serde_json::Value> = v
+        .get("fields")
+        .and_then(|f| f.as_object())
+        .cloned()
+        .unwrap_or_default();
+    let Some(spec) = flow_fields(&cmd) else {
+        db::conv_clear(&state.db, chat_id)?;
+        return Ok(());
+    };
+    let Some((fkey, _)) = spec.get(next) else {
+        db::conv_clear(&state.db, chat_id)?;
+        return Ok(());
+    };
+
+    let val = input.trim();
+    if val.is_empty() {
+        send(bot, chat_id, "输入不能为空，/cancel 取消", None).await?;
+        return Ok(());
+    }
+    let ok = match *fkey {
+        "id" | "n" | "bgm" => val.parse::<i64>().is_ok(),
+        "days" => val == "off" || val.parse::<i64>().is_ok(),
+        "url" => val.starts_with("http"),
+        _ => true,
+    };
+    if !ok {
+        let hint = match *fkey {
+            "id" | "n" | "bgm" => "请输入数字",
+            "days" => "请输入天数或 off",
+            "url" => "请输入 http(s) 链接",
+            _ => "输入无效",
+        };
+        send(bot, chat_id, format!("❌ {hint}，请重试（/cancel 取消）"), None).await?;
+        return Ok(());
+    }
+    fields.insert(fkey.to_string(), json!(val.to_string()));
+
+    if next + 1 < spec.len() {
+        let data = json!({"step":"flow","cmd":cmd,"next":next+1,"fields":fields}).to_string();
+        db::conv_set(&state.db, chat_id, &data)?;
+        let (label, prompt) = spec[next + 1];
+        send(bot, chat_id, format!("⚙️ {label}\n{prompt}（/cancel 取消）"), None).await?;
+    } else {
+        db::conv_clear(&state.db, chat_id)?;
+        apply_flow(state, bot, chat_id, &cmd, &fields).await?;
+    }
+    Ok(())
+}
+
+async fn apply_flow(
+    state: &Arc<AppState>,
+    bot: &Bot,
+    chat_id: i64,
+    cmd: &str,
+    fields: &serde_json::Map<String, serde_json::Value>,
+) -> Result<()> {
+    let get = |k: &str| -> Option<String> {
+        fields.get(k).and_then(|v| v.as_str()).map(|s| s.to_string())
+    };
+    match cmd {
+        "interval" => {
+            let n: u64 = get("n").and_then(|s| s.parse().ok()).unwrap_or(5);
+            db::meta_set(&state.db, "fetch_interval_min", &n.to_string())?;
+            send(bot, chat_id, format!("✅ 轮询间隔设为 {n} 分钟"), None).await?;
+        }
+        "slack" => {
+            let days: i64 = match get("days").as_deref() {
+                Some("off") | Some("0") => 0,
+                s => s.and_then(|x| x.parse().ok()).unwrap_or(0),
+            };
+            db::meta_set(&state.db, "slack_days", &days.to_string())?;
+            if days > 0 {
+                send(bot, chat_id, format!("✅ 摸鱼检测: {days} 天没更新会通知"), None).await?;
+            } else {
+                send(bot, chat_id, "✅ 摸鱼检测已关闭", None).await?;
+            }
+        }
+        "total" => {
+            let id: i64 = get("id").and_then(|s| s.parse().ok()).unwrap_or(0);
+            let n: i64 = get("n").and_then(|s| s.parse().ok()).unwrap_or(0);
+            db::set_sub_total(&state.db, id, Some(n))?;
+            send(bot, chat_id, format!("✅ #{id} 总集数设为 {n}"), None).await?;
+        }
+        "bgm" => {
+            let id: i64 = get("id").and_then(|s| s.parse().ok()).unwrap_or(0);
+            let bgm: i64 = get("bgm").and_then(|s| s.parse().ok()).unwrap_or(0);
+            db::set_sub_bgm(&state.db, id, Some(bgm))?;
+            match crate::scheduler::fetch_bgm_total(&state.http, bgm).await {
+                Ok(Some(total)) => {
+                    db::set_sub_total(&state.db, id, Some(total))?;
+                    send(bot, chat_id, format!("✅ #{id} 绑定 BGM {bgm}，总集数 {total}"), None).await?;
+                }
+                _ => send(
+                    bot,
+                    chat_id,
+                    format!("✅ #{id} 已绑定 BGM {bgm}（暂时取不到总集数，稍后自动刷新）"),
+                    None,
+                )
+                .await?,
+            }
+        }
+        "backup" => {
+            let id: i64 = get("id").and_then(|s| s.parse().ok()).unwrap_or(0);
+            let url = get("url").unwrap_or_default();
+            db::set_sub_backup(&state.db, id, Some(&url))?;
+            send(bot, chat_id, format!("✅ #{id} 备用 RSS 已设置"), None).await?;
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+/// 选择订阅（通用），供 show/edit/del/total/bgm/backup/rmbackup 使用
+async fn show_sub_picker(bot: &Bot, state: &Arc<AppState>, chat_id: i64, cmd: &str) -> Result<()> {
+    let subs = db::list_subscriptions(&state.db)?;
+    if subs.is_empty() {
+        send(bot, chat_id, "📭 还没有订阅，先 /sub 添加", None).await?;
+        return Ok(());
+    }
+    let rows: Vec<Vec<InlineKeyboardButton>> = subs
+        .iter()
+        .map(|s| {
+            let mut label = format!("#{} {}", s.id, s.title);
+            if label.chars().count() > 40 {
+                label = label.chars().take(40).collect();
+            }
+            vec![InlineKeyboardButton::callback(label, format!("pickcmd:{cmd}:{}", s.id))]
+        })
+        .collect();
+    send(
+        bot,
+        chat_id,
+        format!("选择订阅（{cmd}）:"),
+        Some(InlineKeyboardMarkup::new(rows)),
+    )
+    .await?;
+    Ok(())
+}
+
+/// /push 对话框：全部拉取 + 逐个订阅
+async fn show_push_dialog(bot: &Bot, state: &Arc<AppState>, chat_id: i64) -> Result<()> {
+    let subs = db::list_subscriptions(&state.db)?;
+    if subs.is_empty() {
+        send(bot, chat_id, "📭 还没有订阅，先 /sub 添加", None).await?;
+        return Ok(());
+    }
+    let mut rows = vec![vec![InlineKeyboardButton::callback("⚡ 全部拉取", "pushall")]];
+    for s in &subs {
+        let mut label = format!("#{} {}", s.id, s.title);
+        if label.chars().count() > 40 {
+            label = label.chars().take(40).collect();
+        }
+        rows.push(vec![InlineKeyboardButton::callback(
+            label,
+            format!("pickcmd:push:{}", s.id),
+        )]);
+    }
+    send(
+        bot,
+        chat_id,
+        "⚡ 立即拉取\n选择要拉取的订阅：",
+        Some(InlineKeyboardMarkup::new(rows)),
+    )
+    .await?;
+    Ok(())
+}
+
+async fn handle_pick_cmd(bot: &Bot, state: &Arc<AppState>, uid: i64, rest: &str) -> Result<()> {
+    let mut it = rest.splitn(2, ':');
+    let cmd = it.next().unwrap_or("");
+    let id: i64 = it.next().and_then(|s| s.parse().ok()).unwrap_or(0);
+    match cmd {
+        "push" => {
+            if let Some(s) = db::get_subscription(&state.db, id)? {
+                let r = crate::scheduler::process_subscription(state, &s).await?;
+                send(
+                    bot,
+                    uid,
+                    format!(
+                        "✅ #{id} 拉取完成: 新候选 {} · 推送 {} · 询问 {}",
+                        r.new, r.pushed, r.asked
+                    ),
+                    None,
+                )
+                .await?;
+            }
+        }
+        "show" => {
+            if let Some(s) = db::get_subscription(&state.db, id)? {
+                send(bot, uid, sub_detail(&s), None).await?;
+            }
+        }
+        "del" => {
+            if let Some(s) = db::get_subscription(&state.db, id)? {
+                let kb = InlineKeyboardMarkup::new(vec![vec![
+                    InlineKeyboardButton::callback("确认删除", format!("delc:{id}:yes")),
+                    InlineKeyboardButton::callback("取消", format!("delc:{id}:no")),
+                ]]);
+                send(
+                    bot,
+                    uid,
+                    format!("确认删除订阅 <b>{}</b> (#{id})?", html_escape(&s.title)),
+                    Some(kb),
+                )
+                .await?;
+            }
+        }
+        "edit" => {
+            send(bot, uid, format!("编辑订阅 <b>#{id}</b>"), Some(edit_kb(id))).await?;
+        }
+        "rmbackup" => {
+            db::set_sub_backup(&state.db, id, None)?;
+            send(bot, uid, format!("✅ #{id} 备用 RSS 已移除"), None).await?;
+        }
+        "total" | "bgm" | "backup" => {
+            let spec = flow_fields(cmd).unwrap();
+            let mut fields = serde_json::Map::new();
+            fields.insert("id".to_string(), json!(id.to_string()));
+            let data = json!({"step":"flow","cmd":cmd,"next":1,"fields":fields}).to_string();
+            db::conv_set(&state.db, uid, &data)?;
+            let (label, prompt) = spec[1];
+            send(bot, uid, format!("⚙️ {label}\n{prompt}（/cancel 取消）"), None).await?;
+        }
+        _ => {}
     }
     Ok(())
 }
