@@ -22,7 +22,8 @@ pub struct ProcessReport {
     pub asked: usize,
 }
 
-enum Decision {
+#[derive(Debug)]
+pub(crate) enum Decision {
     Push(Vec<Candidate>),
     Ask,
     Skip,
@@ -305,7 +306,7 @@ pub async fn process_subscription(state: &Arc<AppState>, sub: &SubRow) -> Result
     Ok(report)
 }
 
-async fn collect_candidates(
+pub(crate) async fn collect_candidates(
     state: &AppState,
     sub: &SubRow,
     items: &[crate::models::RssItem],
@@ -365,7 +366,7 @@ async fn collect_candidates(
     Ok(candidates)
 }
 
-fn decide_fresh(state: &AppState, sub: &SubRow, ep: u32, cands: &[Candidate]) -> Result<Decision> {
+pub(crate) fn decide_fresh(state: &AppState, sub: &SubRow, ep: u32, cands: &[Candidate]) -> Result<Decision> {
     // 1) 该集已记住的偏好
     if let Some((lang, ver)) = db::get_episode_pref(&state.db, sub.id, ep as i64)? {
         if let Some(v) = ver {

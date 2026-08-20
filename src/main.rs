@@ -10,6 +10,9 @@ mod parser;
 mod rss;
 mod scheduler;
 
+#[cfg(test)]
+mod tests;
+
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 

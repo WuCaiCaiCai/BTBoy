@@ -28,8 +28,12 @@ pub async fn fetch_rss(http: &reqwest::Client, url: &str) -> Result<Vec<RssItem>
         .error_for_status()
         .with_context(|| format!("RSS 状态异常: {url}"))?;
     let body = resp.text().await.context("读取 RSS 响应失败")?;
+    parse_rss_bytes(body.as_bytes())
+}
 
-    let channel = Channel::read_from(body.as_bytes()).context("解析 RSS XML 失败")?;
+/// 从 XML 字节解析 RSS（供测试/离线使用）
+pub fn parse_rss_bytes(body: &[u8]) -> Result<Vec<RssItem>> {
+    let channel = Channel::read_from(body).context("解析 RSS XML 失败")?;
 
     let items = channel
         .items()
@@ -91,7 +95,7 @@ pub async fn resolve_magnet(http: &reqwest::Client, item: &RssItem) -> Option<St
     }
 }
 
-fn looks_like_torrent(url: &str) -> bool {
+pub(crate) fn looks_like_torrent(url: &str) -> bool {
     url.to_ascii_lowercase().ends_with(".torrent") || url.contains("/torrent/")
 }
 
