@@ -192,6 +192,16 @@ pub fn get_subscription(db: &Db, id: i64) -> Result<Option<SubRow>> {
     }
 }
 
+/// 把用户看到的"连续序号"(1-based，按 id 升序的列表位置)解析为真实订阅 id。
+/// 删除订阅后序号会重排，用户输入的始终是当前列表里的第几个。
+pub fn resolve_sub_by_index(db: &Db, idx: i64) -> Result<Option<i64>> {
+    if idx < 1 {
+        return Ok(None);
+    }
+    let subs = list_subscriptions(db)?;
+    Ok(subs.get(idx as usize - 1).map(|s| s.id))
+}
+
 pub fn set_sub_start(db: &Db, id: i64, start: i64) -> Result<()> {
     let conn = db.lock().unwrap();
     conn.execute(

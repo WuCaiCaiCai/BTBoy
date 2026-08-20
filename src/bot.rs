@@ -52,6 +52,11 @@ fn bool_str(b: bool) -> &'static str {
     }
 }
 
+/// 用户输入的"序号"→ 真实订阅id（列表按 id 升序，1-based，删了会重排）
+fn resolve_idx(state: &Arc<AppState>, idx: i64) -> Result<Option<i64>> {
+    db::resolve_sub_by_index(&state.db, idx)
+}
+
 async fn dispatch_command(
     bot: &Bot,
     state: &Arc<AppState>,
@@ -129,7 +134,7 @@ async fn dispatch_command(
                 send(bot, chat_id, "📭 还没有订阅，用 /sub <RSS链接> 添加", None).await?;
             } else {
                 let mut lines = Vec::new();
-                for s in subs {
+                for (i, s) in subs.into_iter().enumerate() {
                     let flag = if s.enabled { "🟢" } else { "⏸️" };
                     let ep = fmt_episode_i(s.start_episode);
                     let lang = if s.lang_pref.is_empty() || s.lang_pref == "ask" {
@@ -144,7 +149,7 @@ async fn dispatch_command(
                     };
                     lines.push(format!(
                         "{flag} <b>#{}</b> {} · 从{ep}话起 · {lang}{extra}\n    {}",
-                        s.id,
+                        i + 1,
                         html_escape(&s.title),
                         html_escape(&s.rss_url)
                     ));
@@ -154,10 +159,14 @@ async fn dispatch_command(
         }
 
         "show" => {
-            if let Some(id) = args.first().and_then(|s| s.parse::<i64>().ok()) {
-                match db::get_subscription(&state.db, id)? {
-                    Some(s) => send(bot, chat_id, sub_detail(&s), None).await?,
-                    None => send(bot, chat_id, format!("未找到订阅 #{id}"), None).await?,
+            if let Some(idx) = args.first().and_then(|s| s.parse::<i64>().ok()) {
+                match resolve_idx(state, idx)? {
+                    Some(id) => {
+                        if let Some(s) = db::get_subscription(&state.db, id)? {
+                            send(bot, chat_id, sub_detail(&s), None).await?;
+                        }
+                    }
+                    None => send(bot, chat_id, format!("未找到订阅 #{idx}"), None).await?,
                 }
             } else {
                 show_sub_picker(bot, state, chat_id, "show").await?;
@@ -165,12 +174,13 @@ async fn dispatch_command(
         }
 
         "edit" => {
-            if let Some(id) = args.first().and_then(|s| s.parse::<i64>().ok()) {
-                if db::get_subscription(&state.db, id)?.is_none() {
-                    send(bot, chat_id, format!("未找到订阅 #{id}"), None).await?;
-                } else {
-                    let kb = edit_kb(id);
-                    send(bot, chat_id, format!("编辑订阅 <b>#{id}</b>"), Some(kb)).await?;
+            if let Some(idx) = args.first().and_then(|s| s.parse::<i64>().ok()) {
+                match resolve_idx(state, idx)? {
+                    Some(id) => {
+                        let kb = edit_kb(id);
+                        send(bot, chat_id, format!("编辑订阅 <b>#{idx}</b>"), Some(kb)).await?;
+                    }
+                    None => send(bot, chat_id, format!("未找到订阅 #{idx}"), None).await?,
                 }
             } else {
                 show_sub_picker(bot, state, chat_id, "edit").await?;
@@ -178,22 +188,24 @@ async fn dispatch_command(
         }
 
         "del" => {
-            if let Some(id) = args.first().and_then(|s| s.parse::<i64>().ok()) {
-                match db::get_subscription(&state.db, id)? {
-                    Some(s) => {
-                        let kb = InlineKeyboardMarkup::new(vec![vec![
-                            InlineKeyboardButton::callback("确认删除", format!("delc:{id}:yes")),
-                            InlineKeyboardButton::callback("取消", format!("delc:{id}:no")),
-                        ]]);
-                        send(
-                            bot,
-                            chat_id,
-                            format!("确认删除订阅 <b>{}</b> (#{id})?", html_escape(&s.title)),
-                            Some(kb),
-                        )
-                        .await?;
+            if let Some(idx) = args.first().and_then(|s| s.parse::<i64>().ok()) {
+                match resolve_idx(state, idx)? {
+                    Some(id) => {
+                        if let Some(s) = db::get_subscription(&state.db, id)? {
+                            let kb = InlineKeyboardMarkup::new(vec![vec![
+                                InlineKeyboardButton::callback("确认删除", format!("delc:{id}:yes")),
+                                InlineKeyboardButton::callback("取消", format!("delc:{id}:no")),
+                            ]]);
+                            send(
+                                bot,
+                                chat_id,
+                                format!("确认删除订阅 <b>{}</b> (#{idx})?", html_escape(&s.title)),
+                                Some(kb),
+                            )
+                            .await?;
+                        }
                     }
-                    None => send(bot, chat_id, format!("未找到订阅 #{id}"), None).await?,
+                    None => send(bot, chat_id, format!("未找到订阅 #{idx}"), None).await?,
                 }
             } else {
                 show_sub_picker(bot, state, chat_id, "del").await?;
@@ -201,15 +213,20 @@ async fn dispatch_command(
         }
 
         "push" => {
-            if let Some(id) = args.first().and_then(|s| s.parse::<i64>().ok()) {
-                match db::get_subscription(&state.db, id)? {
-                    Some(s) => match crate::scheduler::process_subscription(state, &s).await {
-                        Ok(r) => send(bot, chat_id, push_result_text(id, &r), None).await?,
-                        Err(e) => {
-                            send(bot, chat_id, format!("❌ #{id} 拉取失败: {e}"), None).await?
+            if let Some(idx) = args.first().and_then(|s| s.parse::<i64>().ok()) {
+                match resolve_idx(state, idx)? {
+                    Some(id) => {
+                        if let Some(s) = db::get_subscription(&state.db, id)? {
+                            match crate::scheduler::process_subscription(state, &s).await {
+                                Ok(r) => send(bot, chat_id, push_result_text(idx, &r), None).await?,
+                                Err(e) => {
+                                    send(bot, chat_id, format!("❌ #{idx} 拉取失败: {e}"), None)
+                                        .await?
+                                }
+                            }
                         }
-                    },
-                    None => send(bot, chat_id, format!("未找到订阅 #{id}"), None).await?,
+                    }
+                    None => send(bot, chat_id, format!("未找到订阅 #{idx}"), None).await?,
                 }
             } else {
                 show_push_dialog(bot, state, chat_id).await?;
@@ -377,51 +394,65 @@ async fn dispatch_command(
 
         // ---- 订阅级 ----
         "total" => {
-            let id = args.first().and_then(|s| s.parse::<i64>().ok());
+            let idx = args.first().and_then(|s| s.parse::<i64>().ok());
             let n = args.get(1).and_then(|s| s.parse::<i64>().ok());
-            match (id, n) {
-                (Some(id), Some(n)) => {
-                    db::set_sub_total(&state.db, id, Some(n))?;
-                    send(bot, chat_id, format!("✅ #{id} 总集数设为 {n}"), None).await?;
-                }
+            match (idx, n) {
+                (Some(idx), Some(n)) => match resolve_idx(state, idx)? {
+                    Some(id) => {
+                        db::set_sub_total(&state.db, id, Some(n))?;
+                        send(bot, chat_id, format!("✅ #{idx} 总集数设为 {n}"), None).await?;
+                    }
+                    None => send(bot, chat_id, format!("未找到订阅 #{idx}"), None).await?,
+                },
                 _ => show_sub_picker(bot, state, chat_id, "total").await?,
             }
         }
 
         "bgm" => {
-            let id = args.first().and_then(|s| s.parse::<i64>().ok());
+            let idx = args.first().and_then(|s| s.parse::<i64>().ok());
             let bgm = args.get(1).and_then(|s| s.parse::<i64>().ok());
-            match (id, bgm) {
-                (Some(id), Some(bgm)) => {
-                    db::set_sub_bgm(&state.db, id, Some(bgm))?;
-                    match crate::scheduler::fetch_bgm_total(&state.http, bgm).await {
-                        Ok(Some(total)) => {
-                            db::set_sub_total(&state.db, id, Some(total))?;
-                            send(bot, chat_id, format!("✅ #{id} 绑定 BGM {bgm}，总集数 {total}"), None).await?;
+            match (idx, bgm) {
+                (Some(idx), Some(bgm)) => match resolve_idx(state, idx)? {
+                    Some(id) => {
+                        db::set_sub_bgm(&state.db, id, Some(bgm))?;
+                        match crate::scheduler::fetch_bgm_total(&state.http, bgm).await {
+                            Ok(Some(total)) => {
+                                db::set_sub_total(&state.db, id, Some(total))?;
+                                send(bot, chat_id, format!("✅ #{idx} 绑定 BGM {bgm}，总集数 {total}"), None).await?;
+                            }
+                            _ => send(bot, chat_id, format!("✅ #{idx} 已绑定 BGM {bgm}（暂时取不到总集数，稍后会自动刷新）"), None).await?,
                         }
-                        _ => send(bot, chat_id, format!("✅ #{id} 已绑定 BGM {bgm}（暂时取不到总集数，稍后会自动刷新）"), None).await?,
                     }
-                }
+                    None => send(bot, chat_id, format!("未找到订阅 #{idx}"), None).await?,
+                },
                 _ => show_sub_picker(bot, state, chat_id, "bgm").await?,
             }
         }
 
         "backup" => {
-            let id = args.first().and_then(|s| s.parse::<i64>().ok());
+            let idx = args.first().and_then(|s| s.parse::<i64>().ok());
             let url = args.get(1).map(|s| s.as_str());
-            match (id, url) {
-                (Some(id), Some(url)) if url.starts_with("http") => {
-                    db::set_sub_backup(&state.db, id, Some(url))?;
-                    send(bot, chat_id, format!("✅ #{id} 备用 RSS 已设置"), None).await?;
-                }
+            match (idx, url) {
+                (Some(idx), Some(url)) if url.starts_with("http") => match resolve_idx(state, idx)? {
+                    Some(id) => {
+                        db::set_sub_backup(&state.db, id, Some(url))?;
+                        send(bot, chat_id, format!("✅ #{idx} 备用 RSS 已设置"), None).await?;
+                    }
+                    None => send(bot, chat_id, format!("未找到订阅 #{idx}"), None).await?,
+                },
                 _ => show_sub_picker(bot, state, chat_id, "backup").await?,
             }
         }
 
         "rmbackup" => {
-            if let Some(id) = args.first().and_then(|s| s.parse::<i64>().ok()) {
-                db::set_sub_backup(&state.db, id, None)?;
-                send(bot, chat_id, format!("✅ #{id} 备用 RSS 已移除"), None).await?;
+            if let Some(idx) = args.first().and_then(|s| s.parse::<i64>().ok()) {
+                match resolve_idx(state, idx)? {
+                    Some(id) => {
+                        db::set_sub_backup(&state.db, id, None)?;
+                        send(bot, chat_id, format!("✅ #{idx} 备用 RSS 已移除"), None).await?;
+                    }
+                    None => send(bot, chat_id, format!("未找到订阅 #{idx}"), None).await?,
+                }
             } else {
                 show_sub_picker(bot, state, chat_id, "rmbackup").await?;
             }
@@ -737,32 +768,13 @@ async fn handle_conversation_text(
             } else {
                 text
             };
-            let rss_url = v["rss_url"].as_str().unwrap_or("").to_string();
-            let title = v["title"].as_str().unwrap_or("").to_string();
-            let start = v["start_episode"].as_i64().unwrap_or(1);
-            let lang = v["lang"].as_str().unwrap_or("ask").to_string();
-            let poster_url = v["poster_url"].as_str().unwrap_or("").to_string();
-            db::conv_set(
-                &state.db,
-                chat_id,
-                &json!({
-                    "step":"await_sub_exclude",
-                    "rss_url":rss_url,
-                    "title":title,
-                    "start_episode":start,
-                    "lang":lang,
-                    "include_kw":kw,
-                    "poster_url":poster_url
-                })
-                .to_string(),
-            )?;
-            send(
-                bot,
-                chat_id,
-                "🚫 排除包含这些词的资源？(逗号分隔，如 生肉,720P，输入 <code>-</code> 跳过)",
-                None,
-            )
-            .await?;
+            let mut m = serde_json::Map::new();
+            for (k, val) in v.as_object().unwrap() {
+                m.insert(k.clone(), val.clone());
+            }
+            m.insert("include_kw".to_string(), json!(kw));
+            m.remove("step");
+            show_sub_final_menu(bot, state, chat_id, &serde_json::to_string(&m)?).await?;
         }
         "await_sub_exclude" => {
             let text = msg.text().unwrap_or("").trim().to_string();
@@ -771,7 +783,13 @@ async fn handle_conversation_text(
             } else {
                 text
             };
-            finish_sub(state, bot, chat_id, &v, &kw).await?;
+            let mut m = serde_json::Map::new();
+            for (k, val) in v.as_object().unwrap() {
+                m.insert(k.clone(), val.clone());
+            }
+            m.insert("exclude_kw".to_string(), json!(kw));
+            m.remove("step");
+            show_sub_final_menu(bot, state, chat_id, &serde_json::to_string(&m)?).await?;
         }
         _ => {}
     }
@@ -846,6 +864,9 @@ pub async fn handle_callback(bot: Bot, q: CallbackQuery, state: Arc<AppState>) -
         "sublang" => handle_sub_lang(&bot, &state, uid, rest).await,
         "subsrc" => handle_sub_source(&bot, &state, uid, rest).await,
         "subposter" => handle_sub_poster(&bot, &state, uid, rest).await,
+        "subinc" => handle_sub_keyword(&bot, &state, uid, "include").await,
+        "subexc" => handle_sub_keyword(&bot, &state, uid, "exclude").await,
+        "subfin" => handle_sub_finish(&bot, &state, uid).await,
         "edit" => handle_edit_start(&bot, &state, uid, rest).await,
         "editlangsel" => handle_edit_lang_sel(&bot, &state, uid, rest).await,
         "editlang" => handle_edit_lang(&bot, &state, uid, rest).await,
@@ -1004,18 +1025,68 @@ async fn handle_sub_lang(bot: &Bot, state: &Arc<AppState>, uid: i64, rest: &str)
         return Ok(());
     }
 
-    // 无多来源 → 询问自定义包含词
+    // 无多来源 → 直接进入最终菜单
     let mut m = serde_json::Map::new();
     for (k, val) in base.as_object().unwrap() {
         m.insert(k.clone(), val.clone());
     }
-    m.insert("step".to_string(), json!("await_sub_include"));
+    show_sub_final_menu(bot, state, uid, &serde_json::to_string(&m)?).await
+}
+
+/// 订阅流程最后一步：菜单式选择 必包含词 / 排除词 / 直接完成，并展示当前源条目供参考
+async fn show_sub_final_menu(
+    bot: &Bot,
+    state: &Arc<AppState>,
+    uid: i64,
+    conv_json: &str,
+) -> Result<()> {
+    let v: serde_json::Value = serde_json::from_str(conv_json)?;
+    let mut m = serde_json::Map::new();
+    for (k, val) in v.as_object().unwrap() {
+        m.insert(k.clone(), val.clone());
+    }
+    m.insert("step".to_string(), json!("await_sub_final"));
+
+    // 拉取当前源条目做参考
+    let rss_url = v["rss_url"].as_str().unwrap_or("").to_string();
+    let mut samples: Vec<String> = Vec::new();
+    if let Ok(items) = crate::rss::fetch_rss(&state.http, &rss_url).await {
+        for it in items.iter().take(6) {
+            let t: String = it.title.chars().take(70).collect();
+            samples.push(t);
+        }
+    }
+
+    let inc = v["include_kw"].as_str().unwrap_or("");
+    let exc = v["exclude_kw"].as_str().unwrap_or("");
+    let sample_lines: String = if samples.is_empty() {
+        "（拉取不到条目）".to_string()
+    } else {
+        samples
+            .iter()
+            .enumerate()
+            .map(|(i, s)| format!("{}. {s}", i + 1))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+
+    let kb = InlineKeyboardMarkup::new(vec![vec![
+        InlineKeyboardButton::callback("📌 必包含词", "subinc"),
+        InlineKeyboardButton::callback("🚫 排除词", "subexc"),
+        InlineKeyboardButton::callback("✅ 直接完成", "subfin"),
+    ]]);
+
     db::conv_set(&state.db, uid, &serde_json::to_string(&m)?)?;
     send(
         bot,
         uid,
-        "🔍 只推<b>包含</b>这些词的资源？(逗号分隔，如 1080P,HEVC，输入 <code>-</code> 跳过)",
-        None,
+        format!(
+            "📋 最后一步，可添加关键词过滤（不输入直接完成）:\n📌 必包含: {}\n🚫 排除: {}\n\n<b>当前源条目参考:</b>\n{}",
+            if inc.is_empty() { "无" } else { inc },
+            if exc.is_empty() { "无" } else { exc },
+            sample_lines
+        ),
+        Some(kb),
     )
     .await?;
     Ok(())
@@ -1036,21 +1107,49 @@ async fn handle_sub_source(bot: &Bot, state: &Arc<AppState>, uid: i64, rest: &st
         m.insert(k.clone(), val.clone());
     }
     m.insert("include_kw".to_string(), json!(include_kw));
-    m.insert("step".to_string(), json!("await_sub_exclude"));
-    db::conv_set(&state.db, uid, &serde_json::to_string(&m)?)?;
+    m.remove("step");
     let hint = if include_kw.is_empty() {
         "全部片源"
     } else {
         include_kw.as_str()
     };
-    send(
-        bot,
-        uid,
-        format!("✅ 片源已定：{hint}\n🚫 最后一步，排除包含这些词的资源？(逗号分隔，如 生肉,720P，输入 <code>-</code> 跳过)"),
-        None,
-    )
-    .await?;
+    send(bot, uid, format!("✅ 片源已定：{hint}"), None).await?;
+    show_sub_final_menu(bot, state, uid, &serde_json::to_string(&m)?).await
+}
+
+async fn handle_sub_keyword(bot: &Bot, state: &Arc<AppState>, uid: i64, which: &str) -> Result<()> {
+    let Some(data) = db::conv_get(&state.db, uid) else {
+        return Ok(());
+    };
+    let v: serde_json::Value = serde_json::from_str(&data)?;
+    let mut m = serde_json::Map::new();
+    for (k, val) in v.as_object().unwrap() {
+        m.insert(k.clone(), val.clone());
+    }
+    let (step, prompt) = if which == "include" {
+        (
+            "await_sub_include",
+            "📌 输入<b>必包含</b>词（逗号分隔，如 1080P,HEVC；输入 <code>-</code> 清除后返回菜单）",
+        )
+    } else {
+        (
+            "await_sub_exclude",
+            "🚫 输入<b>排除</b>词（逗号分隔，如 生肉,720P；输入 <code>-</code> 清除后返回菜单）",
+        )
+    };
+    m.insert("step".to_string(), json!(step));
+    db::conv_set(&state.db, uid, &serde_json::to_string(&m)?)?;
+    send(bot, uid, prompt, None).await?;
     Ok(())
+}
+
+async fn handle_sub_finish(bot: &Bot, state: &Arc<AppState>, uid: i64) -> Result<()> {
+    let Some(data) = db::conv_get(&state.db, uid) else {
+        return Ok(());
+    };
+    let v: serde_json::Value = serde_json::from_str(&data)?;
+    let exclude_kw = v["exclude_kw"].as_str().unwrap_or("").to_string();
+    finish_sub(state, bot, uid, &v, &exclude_kw).await
 }
 
 async fn handle_sub_poster(bot: &Bot, state: &Arc<AppState>, uid: i64, rest: &str) -> Result<()> {
@@ -1118,11 +1217,12 @@ async fn finish_sub(
         db::set_sub_poster(&state.db, id, Some(&poster_url))?;
     }
     db::conv_clear(&state.db, uid)?;
+    let idx = db::count_subscriptions(&state.db)?;
     send(
         bot,
         uid,
         format!(
-            "✅ 已添加订阅 <b>#{id}</b> {}\n从{}话起 · 简繁: {} · 包含: {} · 排除: {}\n\
+            "✅ 已添加订阅 <b>#{idx}</b> {}\n从{}话起 · 简繁: {} · 包含: {} · 排除: {}\n\
              绑定频道后即开始定时推送（/bind）",
             html_escape(&title),
             fmt_episode_i(start),
@@ -1398,12 +1498,13 @@ async fn show_sub_picker(bot: &Bot, state: &Arc<AppState>, chat_id: i64, cmd: &s
     }
     let rows: Vec<Vec<InlineKeyboardButton>> = subs
         .iter()
-        .map(|s| {
-            let mut label = format!("#{} {}", s.id, s.title);
+        .enumerate()
+        .map(|(i, s)| {
+            let mut label = format!("#{} {}", i + 1, s.title);
             if label.chars().count() > 40 {
                 label = label.chars().take(40).collect();
             }
-            vec![InlineKeyboardButton::callback(label, format!("pickcmd:{cmd}:{}", s.id))]
+            vec![InlineKeyboardButton::callback(label, format!("pickcmd:{cmd}:{}", i + 1))]
         })
         .collect();
     send(
@@ -1438,14 +1539,14 @@ async fn show_push_dialog(bot: &Bot, state: &Arc<AppState>, chat_id: i64) -> Res
         return Ok(());
     }
     let mut rows = vec![vec![InlineKeyboardButton::callback("⚡ 全部拉取", "pushall")]];
-    for s in &subs {
-        let mut label = format!("#{} {}", s.id, s.title);
+    for (i, s) in subs.iter().enumerate() {
+        let mut label = format!("#{} {}", i + 1, s.title);
         if label.chars().count() > 40 {
             label = label.chars().take(40).collect();
         }
         rows.push(vec![InlineKeyboardButton::callback(
             label,
-            format!("pickcmd:push:{}", s.id),
+            format!("pickcmd:push:{}", i + 1),
         )]);
     }
     send(
