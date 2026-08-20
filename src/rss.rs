@@ -110,13 +110,46 @@ pub(crate) fn looks_like_torrent(url: &str) -> bool {
     url.to_ascii_lowercase().ends_with(".torrent") || url.contains("/torrent/")
 }
 
-/// .torrent 字节 → magnet:?xt=urn:btih:<infohash>
+/// .torrent 字节 → magnet:?xt=urn:btih:<infohash>&tr=<tracker>...
+/// 保留 announce / announce-list 的 tracker，保证磁力可正常被客户端解析下载
 pub fn torrent_to_magnet(data: &[u8]) -> Option<String> {
     use sha1::Digest;
     let info = crate::bencode::dict_get(data, b"info")?;
     let hash = sha1::Sha1::digest(info);
     let hex: String = hash.iter().map(|b| format!("{b:02x}")).collect();
-    Some(format!("magnet:?xt=urn:btih:{hex}"))
+
+    let mut magnet = format!("magnet:?xt=urn:btih:{hex}");
+    let mut trackers: Vec<String> = Vec::new();
+    if let Some(a) = crate::bencode::dict_get_str(data, b"announce") {
+        trackers.push(a.to_string());
+    }
+    if let Some(v) = crate::bencode::dict_get(data, b"announce-list") {
+        if let Some(list) = crate::bencode::list_of_lists_strings(v, 0) {
+            for t in list {
+                if !trackers.contains(&t) {
+                    trackers.push(t);
+                }
+            }
+        }
+    }
+    for t in trackers {
+        magnet.push_str("&tr=");
+        magnet.push_str(&percent_encode(&t));
+    }
+    Some(magnet)
+}
+
+/// RFC3986 查询串百分号编码（保留 -._~ 与字母数字）
+fn percent_encode(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'.' | b'_' | b'~') {
+            out.push(b as char);
+        } else {
+            out.push_str(&format!("%{b:02X}"));
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -142,5 +175,35 @@ mod tests {
         assert!(looks_like_torrent("https://x.com/download/torrent/abc123/foo.torrent"));
         assert!(looks_like_torrent("http://x.com/torrent/abc123"));
         assert!(!looks_like_torrent("https://x.com/episode/123"));
+    }
+
+    #[test]
+    fn magnet_includes_trackers() {
+        // 含 announce + announce-list 的 .torrent
+        let data = b"d8:announce21:http://tr.example.com13:announce-listll21:http://tr.example.comel26:udp://tr2.example.com:8080ee4:infod4:name1:a6:lengthi5eee";
+        let m = torrent_to_magnet(data).unwrap();
+        assert_eq!(
+            m,
+            format!(
+                "magnet:?xt=urn:btih:{hash}&tr=http%3A%2F%2Ftr.example.com&tr=udp%3A%2F%2Ftr2.example.com%3A8080",
+                hash = sha1_hex(b"d4:name1:a6:lengthi5ee")
+            )
+        );
+    }
+
+    #[test]
+    fn magnet_without_trackers() {
+        let data = b"d4:infod4:name1:a6:lengthi5ee";
+        let m = torrent_to_magnet(data).unwrap();
+        assert!(m.starts_with("magnet:?xt=urn:btih:"));
+        assert!(!m.contains("&tr="));
+    }
+
+    fn sha1_hex(bytes: &[u8]) -> String {
+        use sha1::Digest;
+        sha1::Sha1::digest(bytes)
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect()
     }
 }

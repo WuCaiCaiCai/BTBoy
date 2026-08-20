@@ -19,6 +19,48 @@ pub fn dict_get<'a>(data: &'a [u8], key: &[u8]) -> Option<&'a [u8]> {
     None
 }
 
+/// 取顶层 dict 的字符串值（如 announce），返回解码后的内容
+pub fn dict_get_str<'a>(data: &'a [u8], key: &[u8]) -> Option<&'a str> {
+    if data.first() != Some(&b'd') {
+        return None;
+    }
+    let mut i = 1usize;
+    while i < data.len() {
+        let (slen, sbytes) = parse_string(data, i)?;
+        if sbytes == key {
+            let (_, content) = parse_string(data, slen)?;
+            return std::str::from_utf8(content).ok();
+        }
+        i = slen;
+        let (_, ve) = value_bounds(data, i)?;
+        i = ve;
+    }
+    None
+}
+
+/// 解析 [[字符串]] 嵌套列表（如 announce-list），i 指向外层 'l'
+pub fn list_of_lists_strings(data: &[u8], i: usize) -> Option<Vec<String>> {
+    if data.get(i) != Some(&b'l') {
+        return None;
+    }
+    let mut j = i + 1;
+    let mut out = Vec::new();
+    while data.get(j) != Some(&b'e') {
+        if data.get(j) == Some(&b'l') {
+            let mut k = j + 1;
+            while data.get(k) != Some(&b'e') {
+                let (end, s) = parse_string(data, k)?;
+                out.push(std::str::from_utf8(s).ok()?.to_string());
+                k = end;
+            }
+            j = k + 1;
+        } else {
+            j = skip_value(data, j)?;
+        }
+    }
+    Some(out)
+}
+
 /// 解析形如 "4:info" 的字符串，返回 (字符串结束位置, 内容字节)
 fn parse_string(data: &[u8], i: usize) -> Option<(usize, &[u8])> {
     let colon = data[i..].iter().position(|&b| b == b':')?;
