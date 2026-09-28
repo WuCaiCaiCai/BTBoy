@@ -102,6 +102,18 @@ pub struct SubRow {
     pub poster_url: Option<String>,
 }
 
+/// 已推送记录（用于 /history）
+#[derive(Debug, Clone)]
+pub struct PushedRow {
+    #[allow(dead_code)]
+    pub subscription_id: i64,
+    pub episode: i64,
+    pub version: i64,
+    pub lang: String,
+    pub title: String,
+    pub pushed_at: String,
+}
+
 /// 待用户决策的冲突
 #[derive(Debug, Clone)]
 #[allow(dead_code)]

@@ -79,6 +79,8 @@ fn bot_commands() -> Vec<BotCommand> {
         ("edit", "编辑订阅"),
         ("del", "删除订阅"),
         ("push", "立即拉取推送"),
+        ("history", "推送历史记录"),
+        ("pending", "查看待选择项"),
         ("bind", "绑定推送频道"),
         ("rss", "轮询总开关 on/off"),
         ("interval", "轮询间隔（分钟）"),
@@ -90,6 +92,8 @@ fn bot_commands() -> Vec<BotCommand> {
         ("bgm", "绑定Bangumi取总集数"),
         ("backup", "设置备用RSS"),
         ("rmbackup", "移除备用RSS"),
+        ("export", "导出订阅备份"),
+        ("import", "导入订阅备份"),
         ("test", "发测试消息到频道"),
         ("status", "查看状态"),
         ("logs", "查看日志"),
@@ -139,11 +143,14 @@ async fn main() -> anyhow::Result<()> {
         poster_cache: Arc::new(Mutex::new(std::collections::HashMap::new())),
     });
 
-    // 重启后给管理员发一条启动提示
+    // 重启后给管理员发一条启动提示；未绑定频道时顺带引导
     if let Some(admin) = crate::resolve_admin(&state) {
-        let _ = bot
-            .send_message(ChatId(admin), "🟢 BTBoy 已启动，开始自动追更")
-            .await;
+        let text = if crate::resolve_channel(&state).is_none() {
+            "🟢 BTBoy 已启动，开始自动追更\n⚠️ 尚未绑定推送频道，发送 /bind 绑定后磁力才会推到频道"
+        } else {
+            "🟢 BTBoy 已启动，开始自动追更"
+        };
+        let _ = bot.send_message(ChatId(admin), text).await;
     }
 
     let sched_state = state.clone();

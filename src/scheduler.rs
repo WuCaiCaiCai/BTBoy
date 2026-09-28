@@ -20,6 +20,8 @@ pub struct ProcessReport {
     pub new: usize,
     pub pushed: usize,
     pub asked: usize,
+    /// 本轮真正进入频道的集号（用于管理员回执）
+    pub pushed_eps: Vec<u32>,
 }
 
 #[derive(Debug)]
@@ -27,6 +29,14 @@ pub(crate) enum Decision {
     Push(Vec<Candidate>),
     Ask,
     Skip,
+}
+
+/// 单条推送的去向，便于调用方判断是否真进了频道
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PushOutcome {
+    Channel,
+    AdminFallback,
+    Dropped,
 }
 
 pub async fn run(state: Arc<AppState>) {
@@ -43,6 +53,9 @@ pub async fn run(state: Arc<AppState>) {
         if let Err(e) = refresh_bgm_if_due(&state, &mut bgm_last_check).await {
             tracing::error!("BGM 总集数刷新失败: {e}");
         }
+        // 记录轮询时间，供 /status 展示节奏
+        let stamp = chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
+        let _ = db::meta_set(&state.db, "last_cycle_at", &stamp);
         let interval_min =
             db::meta_int(&state.db, "fetch_interval_min", state.config.fetch_interval_min as i64)
                 .max(1) as u64;
@@ -117,7 +130,7 @@ pub async fn process_all(state: &Arc<AppState>) -> Result<()> {
         if !sub.enabled {
             continue;
         }
-        match process_subscription(state, &sub).await {
+        match process_subscription(state, &sub, true).await {
             Ok(r) => {
                 if r.new > 0 || r.pushed > 0 || r.asked > 0 {
                     tracing::info!(
@@ -242,7 +255,13 @@ fn days_since(ts: &str) -> i64 {
 }
 
 /// 拉取 → 解析 → 过滤 → 查重 → 推送或询问
-pub async fn process_subscription(state: &Arc<AppState>, sub: &SubRow) -> Result<ProcessReport> {
+/// `notify_admin` 为 true 时，本轮真正进入频道的推送会聚合后给管理员发一条回执
+/// （手动 /push、按钮决策路径传 false，避免与已有结果回复重复）
+pub async fn process_subscription(
+    state: &Arc<AppState>,
+    sub: &SubRow,
+    notify_admin: bool,
+) -> Result<ProcessReport> {
     let skip_half = db::meta_bool(&state.db, "skip_half", false);
 
     let main_items = match fetch_rss(&state.http, &sub.rss_url).await {
@@ -287,10 +306,19 @@ pub async fn process_subscription(state: &Arc<AppState>, sub: &SubRow) -> Result
 
         let already = db::pushed_for_episode(&state.db, sub.id, ep as i64)?;
         if !already.is_empty() {
-            // 已推送过的集数出现新版本/新语言 → 询问追加
-            // （若该集已做过决定：忽略/已追加，则不再打扰）
-            if db::get_episode_pref(&state.db, sub.id, ep as i64)?.is_some() {
-                continue;
+            // 已推送过的集数出现新版本/新语言 → 询问追加。
+            // 已做过决定时：若记住的是"忽略"则跳过；若记住的是某版本，
+            // 仅当出现比该版本（及已推版本）更高的版本时才再问一次。
+            match db::get_episode_pref(&state.db, sub.id, ep as i64)? {
+                Some((_, None)) => continue,
+                Some((_, Some(chosen))) => {
+                    let max_pushed = already.iter().map(|(v, _, _)| *v).max().unwrap_or(0);
+                    let newest = cands.iter().map(|c| c.version as i64).max().unwrap_or(0);
+                    if newest <= chosen.max(max_pushed) {
+                        continue;
+                    }
+                }
+                None => {}
             }
             ask_update(state, sub, ep, &cands).await?;
             report.asked += 1;
@@ -300,8 +328,11 @@ pub async fn process_subscription(state: &Arc<AppState>, sub: &SubRow) -> Result
         match decide_fresh(state, sub, ep, &cands)? {
             Decision::Push(list) => {
                 for c in list {
-                    push_candidate(state, sub, &c).await?;
+                    let outcome = push_candidate(state, sub, &c).await?;
                     report.pushed += 1;
+                    if outcome == PushOutcome::Channel {
+                        report.pushed_eps.push(c.episode);
+                    }
                 }
             }
             Decision::Ask => {
@@ -310,6 +341,24 @@ pub async fn process_subscription(state: &Arc<AppState>, sub: &SubRow) -> Result
             }
             Decision::Skip => {}
         }
+    }
+
+    // 自动轮询：聚合一条回执，避免管理员对频道推送完全无感知
+    if notify_admin && !report.pushed_eps.is_empty() {
+        report.pushed_eps.sort_unstable();
+        report.pushed_eps.dedup();
+        let eps = report
+            .pushed_eps
+            .iter()
+            .map(|e| crate::models::fmt_episode(*e))
+            .collect::<Vec<_>>()
+            .join(" ");
+        let msg = format!(
+            "📤 <b>{}</b> 已推送 第{}话 → 频道",
+            notifier::html_escape(&sub.title),
+            eps
+        );
+        let _ = inform(state, &msg).await;
     }
 
     Ok(report)
@@ -391,10 +440,11 @@ pub(crate) async fn collect_candidates(
             continue;
         }
         let pushed = db::pushed_for_episode(&state.db, sub.id, ep as i64)?;
-        if pushed
-            .iter()
-            .any(|(v, l)| *v == p.version as i64 && l == p.lang.label())
-        {
+        if pushed.iter().any(|(v, l, s)| {
+            *v == p.version as i64
+                && l == p.lang.label()
+                && s == p.source.as_deref().unwrap_or("")
+        }) {
             continue;
         }
         candidates.push(Candidate {
@@ -451,58 +501,77 @@ pub(crate) fn decide_fresh(state: &AppState, sub: &SubRow, ep: u32, cands: &[Can
     Ok(Decision::Ask)
 }
 
-async fn push_candidate(state: &AppState, sub: &SubRow, c: &Candidate) -> Result<()> {
+pub(crate) async fn push_candidate(
+    state: &AppState,
+    sub: &SubRow,
+    c: &Candidate,
+) -> Result<PushOutcome> {
     let msg = notifier::format_push(sub, c);
-    match crate::resolve_channel(state) {
+    let outcome = match crate::resolve_channel(state) {
         Some(ch) => {
             send_with_poster(state, ChatId(ch), &msg, sub).await?;
             tracing::info!("推送 sub#{} 第{}话 -> 频道 {ch}", sub.id, fmt_episode(c.episode));
+            PushOutcome::Channel
         }
         None => match crate::resolve_admin(state) {
             Some(a) => {
                 let warn = format!("⚠️ 未绑定频道，磁力发到管理员会话\n\n{msg}");
                 send_with_poster(state, ChatId(a), &warn, sub).await?;
+                PushOutcome::AdminFallback
             }
-            None => tracing::warn!("无管理员无频道，丢弃磁力: {}", c.magnet),
+            None => {
+                tracing::warn!("无管理员无频道，丢弃磁力: {}", c.magnet);
+                PushOutcome::Dropped
+            }
         },
-    }
+    };
     let _ = db::insert_pushed(
         &state.db,
         sub.id,
         c.episode as i64,
         c.version as i64,
         &c.lang,
+        c.source.as_deref().unwrap_or(""),
         &c.magnet,
         &c.title,
         &c.link,
     );
     let _ = db::set_sub_last_push(&state.db, sub.id);
-    Ok(())
+    Ok(outcome)
 }
 
 /// 优先以"封面+标题+磁力"图文消息推送；无封面/失败时退回纯文本
 async fn send_with_poster(state: &AppState, chat_id: ChatId, text: &str, sub: &SubRow) -> Result<()> {
     if let Some(bytes) = get_or_fetch_poster(state, sub).await {
-        if let Err(e) = state
-            .bot
-            .send_photo(chat_id, teloxide::types::InputFile::memory(bytes))
-            .caption(text.to_string())
-            .parse_mode(ParseMode::Html)
-            .await
-        {
+        let res = notifier::send_retry(|| async {
+            state
+                .bot
+                .send_photo(chat_id, teloxide::types::InputFile::memory(bytes.clone()))
+                .caption(text.to_string())
+                .parse_mode(ParseMode::Html)
+                .await
+        })
+        .await;
+        if let Err(e) = res {
             tracing::warn!("发送封面图文失败(退回纯文本): {e}");
+            notifier::send_retry(|| async {
+                state
+                    .bot
+                    .send_message(chat_id, text.to_string())
+                    .parse_mode(ParseMode::Html)
+                    .await
+            })
+            .await?;
+        }
+    } else {
+        notifier::send_retry(|| async {
             state
                 .bot
                 .send_message(chat_id, text.to_string())
                 .parse_mode(ParseMode::Html)
-                .await?;
-        }
-    } else {
-        state
-            .bot
-            .send_message(chat_id, text.to_string())
-            .parse_mode(ParseMode::Html)
-            .await?;
+                .await
+        })
+        .await?;
     }
     Ok(())
 }
@@ -532,56 +601,83 @@ async fn get_or_fetch_poster(state: &AppState, sub: &SubRow) -> Option<Vec<u8>> 
 async fn ask_fresh(state: &AppState, sub: &SubRow, ep: u32, cands: &[Candidate]) -> Result<()> {
     let json = serde_json::to_string(cands)?;
     let pid = db::save_pending(&state.db, sub.id, ep as i64, "fresh", &json)?;
-
-    let lines: Vec<String> = cands
-        .iter()
-        .enumerate()
-        .map(|(i, c)| notifier::candidate_line(c, i))
-        .collect();
-    let text = format!(
-        "🧐 <b>{}</b> 第{}话 发现多个来源/版本\n{}\n\n要推送哪个？",
-        notifier::html_escape(&sub.title),
-        fmt_episode(ep),
-        lines.join("\n"),
-    );
-
-    let mut rows = vec![(0..cands.len().min(6))
-        .map(|i| InlineKeyboardButton::callback((i + 1).to_string(), format!("pick:{pid}:{i}")))
-        .collect::<Vec<_>>()];
-    rows.push(vec![
-        InlineKeyboardButton::callback("全部", format!("pickall:{pid}")),
-        InlineKeyboardButton::callback("跳过", format!("skip:{pid}")),
-        InlineKeyboardButton::callback("稍后", format!("later:{pid}")),
-    ]);
-
-    send_to_admin(state, text, InlineKeyboardMarkup::new(rows)).await
+    let pending = crate::models::Pending {
+        id: pid,
+        subscription_id: sub.id,
+        episode: ep as i64,
+        candidates_json: json,
+        kind: "fresh".into(),
+    };
+    render_pending(state, &pending).await
 }
 
 async fn ask_update(state: &AppState, sub: &SubRow, ep: u32, cands: &[Candidate]) -> Result<()> {
     let json = serde_json::to_string(cands)?;
     let pid = db::save_pending(&state.db, sub.id, ep as i64, "update", &json)?;
+    let pending = crate::models::Pending {
+        id: pid,
+        subscription_id: sub.id,
+        episode: ep as i64,
+        candidates_json: json,
+        kind: "update".into(),
+    };
+    render_pending(state, &pending).await
+}
 
+/// 根据待决策记录重建询问消息与按钮（供首次询问与 /pending 重发共用）
+pub(crate) async fn render_pending(state: &AppState, pending: &crate::models::Pending) -> Result<()> {
+    let sub = db::get_subscription(&state.db, pending.subscription_id)?.context("订阅不存在")?;
+    let cands: Vec<Candidate> =
+        serde_json::from_str(&pending.candidates_json).context("候选数据损坏")?;
+    let ep = pending.episode as u32;
+    let pid = pending.id;
     let lines: Vec<String> = cands
         .iter()
         .enumerate()
         .map(|(i, c)| notifier::candidate_line(c, i))
         .collect();
-    let text = format!(
-        "♻️ <b>{}</b> 第{}话 发现新版本\n{}\n\n追加推送？",
-        notifier::html_escape(&sub.title),
-        fmt_episode(ep),
-        lines.join("\n"),
-    );
 
+    let (header, actions) = if pending.kind == "update" {
+        (
+            format!(
+                "♻️ <b>{}</b> 第{}话 发现新版本\n{}\n\n追加推送？",
+                notifier::html_escape(&sub.title),
+                fmt_episode(ep),
+                lines.join("\n"),
+            ),
+            vec![
+                InlineKeyboardButton::callback("忽略", format!("noadd:{pid}")),
+                InlineKeyboardButton::callback("稍后", format!("later:{pid}")),
+            ],
+        )
+    } else {
+        (
+            format!(
+                "🧐 <b>{}</b> 第{}话 发现多个来源/版本\n{}\n\n要推送哪个？",
+                notifier::html_escape(&sub.title),
+                fmt_episode(ep),
+                lines.join("\n"),
+            ),
+            vec![
+                InlineKeyboardButton::callback("全部", format!("pickall:{pid}")),
+                InlineKeyboardButton::callback("跳过", format!("skip:{pid}")),
+                InlineKeyboardButton::callback("稍后", format!("later:{pid}")),
+            ],
+        )
+    };
+
+    let action_prefix = if pending.kind == "update" { "add" } else { "pick" };
     let mut rows = vec![(0..cands.len().min(6))
-        .map(|i| InlineKeyboardButton::callback((i + 1).to_string(), format!("add:{pid}:{i}")))
+        .map(|i| {
+            InlineKeyboardButton::callback(
+                (i + 1).to_string(),
+                format!("{action_prefix}:{pid}:{i}"),
+            )
+        })
         .collect::<Vec<_>>()];
-    rows.push(vec![
-        InlineKeyboardButton::callback("忽略", format!("noadd:{pid}")),
-        InlineKeyboardButton::callback("稍后", format!("later:{pid}")),
-    ]);
+    rows.push(actions);
 
-    send_to_admin(state, text, InlineKeyboardMarkup::new(rows)).await
+    send_to_admin(state, header, InlineKeyboardMarkup::new(rows)).await
 }
 
 /// 处理冲突询问按钮回调（pick / pickall / skip / later / add / noadd）

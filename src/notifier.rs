@@ -1,4 +1,49 @@
+use std::time::Duration;
+
 use crate::models::{Candidate, SubRow, fmt_episode};
+
+/// 最近一次 Telegram 发送的时间戳（毫秒），用于全局节流
+static LAST_SEND_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+fn now_millis() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as u64)
+        .unwrap_or(0)
+}
+
+/// 保证两次发送之间至少间隔 1.2s，避免批量推送触发 Telegram 429
+pub async fn throttle() {
+    const MIN_MS: u64 = 1200;
+    loop {
+        let now = now_millis();
+        let last = LAST_SEND_MS.load(std::sync::atomic::Ordering::Relaxed);
+        let elapsed = now.saturating_sub(last);
+        if elapsed >= MIN_MS {
+            LAST_SEND_MS.store(now, std::sync::atomic::Ordering::Relaxed);
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(MIN_MS - elapsed)).await;
+    }
+}
+
+/// 发送前节流；遇到 `RetryAfter` 限流时等待后重试一次
+pub async fn send_retry<F, Fut, T>(mut f: F) -> Result<T, teloxide::RequestError>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<T, teloxide::RequestError>>,
+{
+    throttle().await;
+    match f().await {
+        Err(teloxide::RequestError::RetryAfter(secs)) => {
+            tracing::warn!("Telegram 限流，等待 {}s 后重试", secs.seconds());
+            tokio::time::sleep(secs.duration() + Duration::from_secs(1)).await;
+            throttle().await;
+            f().await
+        }
+        other => other,
+    }
+}
 
 pub fn html_escape(s: &str) -> String {
     s.replace('&', "&amp;")

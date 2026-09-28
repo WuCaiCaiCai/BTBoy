@@ -36,24 +36,47 @@ git push -u origin main
 
 > 注意：仓库公开后所有提交历史可见。用隐私邮箱（GitHub noreply）提交，避免暴露个人邮箱。
 
-## Docker Hub 发布
+## Docker Hub 发布（仅 amd64）
 
 ```bash
 # 1. 登录（token 在 Docker Hub → Account Settings → Security 创建）
 docker login -u wucaicai
 
-# 2. 单架构构建 + 推送（快）
-docker build -t wucaicai/btboy:latest .
+# 2. 构建 + 推送（仅 linux/amd64，快）
+docker build --platform linux/amd64 -t wucaicai/btboy:latest .
 docker push wucaicai/btboy:latest
-
-# 3. 多架构 amd64 + arm64（VPS / 软路由都能用）
-#    需先注册多架构模拟器，否则 arm64 报 exec format error
-docker run --privileged --rm tonistiigi/binfmt --install all
-docker buildx create --name multi --driver docker-container --use
-docker buildx build --platform linux/amd64,linux/arm64 -t wucaicai/btboy:latest --push .
 ```
 
-> 多架构 = QEMU 模拟编译，arm64 较慢（20-40 分钟）属正常；只需 amd64 用单架构命令即可。
+### 发布新版本
+
+推荐同时打版本号与 `latest`，便于回滚（仍只发 amd64）：
+
+```bash
+# 例：发布 v0.2.0
+docker build --platform linux/amd64 \
+  -t wucaicai/btboy:v0.2.0 -t wucaicai/btboy:latest .
+docker push wucaicai/btboy:v0.2.0
+docker push wucaicai/btboy:latest
+```
+
+> 可选：如需 arm64（VPS / 软路由），再用 buildx 发多架构：
+> `docker buildx build --platform linux/amd64,linux/arm64 -t wucaicai/btboy:latest --push .`
+
+### 用户端如何更新
+
+```bash
+# docker compose
+docker compose pull && docker compose up -d
+
+# docker run
+docker pull wucaicai/btboy:latest
+docker rm -f btboy
+docker run -d --name btboy --restart unless-stopped \
+  -e TELEGRAM_BOT_TOKEN=xxx -e ADMIN_ID=xxx \
+  -v $PWD/data:/data wucaicai/btboy:latest
+```
+
+`docker restart` 不会重新拉取镜像；`/data` 数据卷保留，`db::migrate` 会在启动时自动补齐新增字段。
 
 ## 镜像结构
 

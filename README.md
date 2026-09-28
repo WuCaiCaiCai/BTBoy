@@ -45,6 +45,22 @@ docker run -d --name btboy --restart unless-stopped \
 
 > 📖 完整使用教程见 **[docs/USAGE.md](docs/USAGE.md)**，常见问题见 **[docs/FAQ.md](docs/FAQ.md)**
 
+## 更新版本
+
+```bash
+# docker compose 部署（推荐）
+docker compose pull && docker compose up -d
+
+# docker run 部署
+docker pull wucaicai/btboy:latest
+docker rm -f btboy
+docker run -d --name btboy --restart unless-stopped \
+  -e TELEGRAM_BOT_TOKEN=你的Token -e ADMIN_ID=你的数字ID \
+  -v $PWD/data:/data wucaicai/btboy:latest
+```
+
+> `docker restart` 不会拉取新镜像；务必先 `pull` 再重建容器。`/data` 数据目录保留，数据库会自动迁移。
+
 ## 命令一览
 
 | 命令 | 说明 |
@@ -53,6 +69,8 @@ docker run -d --name btboy --restart unless-stopped \
 | `/list` | 列出所有订阅 |
 | `/show` `/edit` `/del` | 详情 / 编辑 / 删除（无参弹订阅选择） |
 | `/push` | 立即拉取（全部 / 逐个） |
+| `/history [id] [n]` | 查看推送历史 |
+| `/pending` | 查看待选择项并重发 |
 | `/bind` | 绑定推送频道 |
 | `/rss on\|off` | 轮询总开关 |
 | `/interval <分钟>` | 轮询间隔 |
@@ -64,6 +82,7 @@ docker run -d --name btboy --restart unless-stopped \
 | `/bgm <id> <bgmid>` | 绑定 Bangumi 自动取总集数 |
 | `/backup <id> <rss>` | 设置备用 RSS |
 | `/rmbackup <id>` | 移除备用 RSS |
+| `/export` `/import` | 导出 / 导入订阅备份 |
 | `/test` `/status` `/logs` | 测试 / 状态 / 日志 |
 | `/cancel` | 取消当前操作 |
 

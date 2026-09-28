@@ -3,7 +3,7 @@ use std::sync::{Arc, Mutex};
 use anyhow::{Context, Result};
 use rusqlite::{params, Connection};
 
-use crate::models::{Pending, SubRow};
+use crate::models::{Pending, PushedRow, SubRow};
 
 pub type Db = Arc<Mutex<Connection>>;
 
@@ -37,6 +37,7 @@ CREATE TABLE IF NOT EXISTS pushed_items (
     episode INTEGER NOT NULL,
     version INTEGER NOT NULL DEFAULT 1,
     lang TEXT NOT NULL DEFAULT '',
+    source TEXT NOT NULL DEFAULT '',
     magnet TEXT NOT NULL,
     title TEXT NOT NULL,
     link TEXT NOT NULL DEFAULT '',
@@ -95,6 +96,19 @@ pub fn migrate(db: &Db) -> Result<()> {
         > 0;
     if !has_poster {
         conn.execute_batch("ALTER TABLE subscriptions ADD COLUMN poster_url TEXT DEFAULT ''")?;
+    }
+    let has_source: bool = conn
+        .query_row(
+            "SELECT COUNT(*) FROM pragma_table_info('pushed_items') WHERE name='source'",
+            [],
+            |r| r.get::<_, i64>(0),
+        )
+        .unwrap_or(0)
+        > 0;
+    if !has_source {
+        conn.execute_batch(
+            "ALTER TABLE pushed_items ADD COLUMN source TEXT NOT NULL DEFAULT ''",
+        )?;
     }
     Ok(())
 }
@@ -347,15 +361,54 @@ pub fn set_sub_poster(db: &Db, id: i64, url: Option<&str>) -> Result<()> {
 
 // ---------------- pushed items ----------------
 
-/// 该订阅+该集已推送过的 (版本, 语言)
-pub fn pushed_for_episode(db: &Db, sub_id: i64, ep: i64) -> Result<Vec<(i64, String)>> {
+/// 该订阅+该集已推送过的 (版本, 语言, 片源)
+pub fn pushed_for_episode(db: &Db, sub_id: i64, ep: i64) -> Result<Vec<(i64, String, String)>> {
     let conn = db.lock().unwrap();
     let mut stmt = conn.prepare(
-        "SELECT version, lang FROM pushed_items WHERE subscription_id = ?1 AND episode = ?2",
+        "SELECT version, lang, source FROM pushed_items WHERE subscription_id = ?1 AND episode = ?2",
     )?;
     let rows = stmt
-        .query_map(params![sub_id, ep], |r| Ok((r.get(0)?, r.get(1)?)))?
+        .query_map(params![sub_id, ep], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
         .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(rows)
+}
+
+/// 推送历史（可选按订阅过滤，按时间倒序）
+pub fn list_pushed(db: &Db, sub_id: Option<i64>, limit: i64) -> Result<Vec<PushedRow>> {
+    let conn = db.lock().unwrap();
+    let limit = limit.clamp(1, 200);
+    fn map_pushed(r: &rusqlite::Row) -> rusqlite::Result<PushedRow> {
+        Ok(PushedRow {
+            subscription_id: r.get(0)?,
+            episode: r.get(1)?,
+            version: r.get(2)?,
+            lang: r.get(3)?,
+            title: r.get(4)?,
+            pushed_at: r.get(5)?,
+        })
+    }
+    let rows: Vec<PushedRow> = match sub_id {
+        Some(id) => {
+            let mut stmt = conn.prepare(
+                "SELECT subscription_id, episode, version, lang, title, pushed_at
+                 FROM pushed_items WHERE subscription_id = ?1 ORDER BY id DESC LIMIT ?2",
+            )?;
+            let collected = stmt
+                .query_map(params![id, limit], map_pushed)?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            collected
+        }
+        None => {
+            let mut stmt = conn.prepare(
+                "SELECT subscription_id, episode, version, lang, title, pushed_at
+                 FROM pushed_items ORDER BY id DESC LIMIT ?1",
+            )?;
+            let collected = stmt
+                .query_map(params![limit], map_pushed)?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            collected
+        }
+    };
     Ok(rows)
 }
 
@@ -390,17 +443,39 @@ pub fn insert_pushed(
     ep: i64,
     version: i64,
     lang: &str,
+    source: &str,
     magnet: &str,
     title: &str,
     link: &str,
 ) -> Result<()> {
     let conn = db.lock().unwrap();
     conn.execute(
-        "INSERT INTO pushed_items (subscription_id, episode, version, lang, magnet, title, link, pushed_at)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
-        params![sub_id, ep, version, lang, magnet, title, link, now()],
+        "INSERT INTO pushed_items (subscription_id, episode, version, lang, source, magnet, title, link, pushed_at)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+        params![sub_id, ep, version, lang, source, magnet, title, link, now()],
     )?;
     Ok(())
+}
+
+/// 是否已存在同 RSS 链接的订阅（/import 去重）
+pub fn has_subscription_rss(db: &Db, rss_url: &str) -> Result<bool> {
+    let conn = db.lock().unwrap();
+    let n: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM subscriptions WHERE rss_url = ?1",
+        params![rss_url],
+        |r| r.get(0),
+    )?;
+    Ok(n > 0)
+}
+
+/// 某订阅待决策数量
+pub fn pending_count_for_sub(db: &Db, sub_id: i64) -> Result<i64> {
+    let conn = db.lock().unwrap();
+    Ok(conn.query_row(
+        "SELECT COUNT(*) FROM pending_decisions WHERE subscription_id = ?1",
+        params![sub_id],
+        |r| r.get(0),
+    )?)
 }
 
 pub fn count_pushed(db: &Db) -> Result<i64> {
@@ -531,6 +606,22 @@ pub fn delete_pending(db: &Db, id: i64) -> Result<()> {
     conn.execute("DELETE FROM pending_decisions WHERE id = ?1", params![id])?;
     Ok(())
 }
+
+/// 待决策列表（含番名），用于 /pending
+pub fn list_pending_with_title(db: &Db) -> Result<Vec<(i64, i64, String, String)>> {
+    let conn = db.lock().unwrap();
+    let mut stmt = conn.prepare(
+        "SELECT p.id, p.episode, p.kind, s.title
+         FROM pending_decisions p JOIN subscriptions s ON s.id = p.subscription_id
+         ORDER BY p.created_at DESC",
+    )?;
+    let rows = stmt
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    Ok(rows)
+}
+
+
 
 // ---------------- conversations ----------------
 

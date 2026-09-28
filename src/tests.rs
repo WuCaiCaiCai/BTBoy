@@ -147,6 +147,70 @@ fn index_mapping_survives_deletion() {
     assert_eq!(db::resolve_sub_by_index(&state.db, 3).unwrap(), None);
 }
 
+#[test]
+fn history_and_pending_queries() {
+    let state = test_state();
+    let sub = db::add_subscription(&state.db, "http://h", "番H").unwrap();
+    db::insert_pushed(&state.db, sub, 7, 1, "简中", "Baha", "m1", "t", "l1").unwrap();
+    db::insert_pushed(&state.db, sub, 8, 2, "繁中", "CR", "m2", "t", "l2").unwrap();
+
+    // pushed_for_episode 带片源
+    let ep7 = db::pushed_for_episode(&state.db, sub, 7).unwrap();
+    assert_eq!(ep7, vec![(1, "简中".to_string(), "Baha".to_string())]);
+
+    // 历史：倒序 + 按订阅过滤
+    let all = db::list_pushed(&state.db, None, 10).unwrap();
+    assert_eq!(all.len(), 2);
+    assert_eq!(all[0].episode, 8);
+    assert_eq!(all[0].lang, "繁中");
+    assert_eq!(db::list_pushed(&state.db, Some(sub), 10).unwrap().len(), 2);
+    assert_eq!(db::list_pushed(&state.db, Some(sub + 999), 10).unwrap().len(), 0);
+
+    // 待决策列表含番名
+    db::save_pending(&state.db, sub, 8, "fresh", "[]").unwrap();
+    let pend = db::list_pending_with_title(&state.db).unwrap();
+    assert_eq!(pend.len(), 1);
+    assert_eq!(pend[0].0, 1);
+    assert_eq!(pend[0].1, 8);
+    assert_eq!(pend[0].2, "fresh");
+    assert_eq!(pend[0].3, "番H");
+}
+
+#[tokio::test]
+async fn different_source_not_deduped() {
+    let state = test_state();
+    let sub_id = db::add_subscription(&state.db, "http://t", "再見菈菈 / Sayonara Lara").unwrap();
+    // 已推过 Baha 源 v1（语言未知）
+    db::insert_pushed(
+        &state.db,
+        sub_id,
+        7,
+        1,
+        "未知",
+        "Baha",
+        "magnet:?xt=urn:btih:beef",
+        "t",
+        "link-baha",
+    )
+    .unwrap();
+
+    let mut items = rss::parse_rss_bytes(FIXTURE.as_bytes()).unwrap();
+    for it in &mut items {
+        let hash = sha1_digest(it.title.as_bytes());
+        it.magnet = Some(format!("magnet:?xt=urn:btih:{hash}"));
+    }
+    let sub = db::get_subscription(&state.db, sub_id).unwrap().unwrap();
+    let cands = scheduler::collect_candidates(&state, &sub, &items, false, "http://t")
+        .await
+        .unwrap();
+    // fixture 三条：ABEMA/CR/Baha 同集同版本同语言，仅片源不同。
+    // Baha 已推 → 去重；ABEMA/CR 应保留（旧逻辑会因忽略片源而全部丢弃）
+    assert_eq!(cands.len(), 2);
+    assert!(!cands
+        .iter()
+        .any(|c| c.source.as_deref() == Some("Baha")));
+}
+
 // 让 unused 警告不出现：Candidate 在测试里用到即消除，若未用到则此辅助仅作占位
 #[allow(dead_code)]
 fn _touch(c: Candidate) {
