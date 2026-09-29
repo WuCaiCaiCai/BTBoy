@@ -1,5 +1,4 @@
 //! 基于用户提供的真实 bangumi.moe RSS 数据的管线测试
-#![cfg(test)]
 
 use std::sync::{Arc, Mutex};
 
@@ -102,7 +101,7 @@ async fn pipeline_detects_3_sources_and_asks() {
 
     // 3 个候选且 lang_pref=ask → 应触发询问让用户选
     match scheduler::decide_fresh(&state, &sub, 7, &candidates).unwrap() {
-        scheduler::Decision::Ask => {}
+        scheduler::Decision::Ask(list) => assert_eq!(list.len(), 3),
         other => panic!("期望 Ask，实际 {other:?}"),
     }
 
@@ -209,6 +208,87 @@ async fn different_source_not_deduped() {
     assert!(!cands
         .iter()
         .any(|c| c.source.as_deref() == Some("Baha")));
+}
+
+fn cand(lang: &str, source: &str, version: u32, hash: &str) -> Candidate {
+    Candidate {
+        title: "t".into(),
+        magnet: format!("magnet:?xt=urn:btih:{hash}"),
+        fansub: None,
+        episode: 1,
+        version,
+        lang: lang.into(),
+        quality: Some("1080P".into()),
+        codec: None,
+        source: Some(source.into()),
+        link: String::new(),
+    }
+}
+
+#[test]
+fn fresh_push_ignores_opposite_lang() {
+    // 简中偏好：只有一个简中候选时直接推它，繁中不参与
+    let state = test_state();
+    let sub_id = db::add_subscription(&state.db, "http://t", "番").unwrap();
+    db::set_sub_lang(&state.db, sub_id, "简中").unwrap();
+    let sub = db::get_subscription(&state.db, sub_id).unwrap().unwrap();
+
+    let cands = vec![cand("简中", "ABEMA", 1, "aa"), cand("繁中", "CR", 1, "bb")];
+    match scheduler::decide_fresh(&state, &sub, 1, &cands).unwrap() {
+        scheduler::Decision::Push(list) => {
+            assert_eq!(list.len(), 1);
+            assert_eq!(list[0].lang, "简中");
+        }
+        other => panic!("期望 Push 简中，实际 {other:?}"),
+    }
+
+    // 两个简中候选 → Ask 只带简中，繁中被过滤，避免"全部"误推反语言
+    let cands = vec![
+        cand("简中", "ABEMA", 1, "aa"),
+        cand("简中", "CR", 1, "bb"),
+        cand("繁中", "Baha", 1, "cc"),
+    ];
+    match scheduler::decide_fresh(&state, &sub, 1, &cands).unwrap() {
+        scheduler::Decision::Ask(list) => {
+            assert_eq!(list.len(), 2);
+            assert!(list.iter().all(|c| c.lang == "简中"));
+        }
+        other => panic!("期望 Ask，实际 {other:?}"),
+    }
+}
+
+#[test]
+fn update_only_asks_on_higher_version_after_lang_filter() {
+    // 已推简中 v1
+    let already = vec![(1i64, "简中".to_string(), "ABEMA".to_string())];
+
+    // 反语言候选：调用方已按偏好过滤 → allowed 为空 → 不问（重启后不再误问）
+    let allowed: Vec<Candidate> = vec![];
+    assert!(!scheduler::should_ask_update(&allowed, &already, None));
+
+    // 同版本新片源 → 不问
+    let allowed = vec![cand("简中", "CR", 1, "bb")];
+    assert!(!scheduler::should_ask_update(&allowed, &already, None));
+
+    // 更高版本 → 问
+    let allowed = vec![cand("简中", "ABEMA", 2, "dd")];
+    assert!(scheduler::should_ask_update(&allowed, &already, None));
+
+    // 用户已选"忽略" → 永不问
+    let allowed = vec![cand("简中", "ABEMA", 3, "ee")];
+    assert!(!scheduler::should_ask_update(
+        &allowed,
+        &already,
+        Some(("简中".into(), None))
+    ));
+
+    // 已选 v1，出现 v2 → 问
+    let allowed = vec![cand("简中", "ABEMA", 2, "dd")];
+    assert!(scheduler::should_ask_update(
+        &allowed,
+        &already,
+        Some(("简中".into(), Some(1)))
+    ));
 }
 
 // 让 unused 警告不出现：Candidate 在测试里用到即消除，若未用到则此辅助仅作占位

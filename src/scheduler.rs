@@ -27,7 +27,8 @@ pub struct ProcessReport {
 #[derive(Debug)]
 pub(crate) enum Decision {
     Push(Vec<Candidate>),
-    Ask,
+    /// 待询问的候选（已按订阅简繁偏好过滤，展示/推送都只用这批）
+    Ask(Vec<Candidate>),
     Skip,
 }
 
@@ -306,21 +307,20 @@ pub async fn process_subscription(
 
         let already = db::pushed_for_episode(&state.db, sub.id, ep as i64)?;
         if !already.is_empty() {
-            // 已推送过的集数出现新版本/新语言 → 询问追加。
-            // 已做过决定时：若记住的是"忽略"则跳过；若记住的是某版本，
-            // 仅当出现比该版本（及已推版本）更高的版本时才再问一次。
-            match db::get_episode_pref(&state.db, sub.id, ep as i64)? {
-                Some((_, None)) => continue,
-                Some((_, Some(chosen))) => {
-                    let max_pushed = already.iter().map(|(v, _, _)| *v).max().unwrap_or(0);
-                    let newest = cands.iter().map(|c| c.version as i64).max().unwrap_or(0);
-                    if newest <= chosen.max(max_pushed) {
-                        continue;
-                    }
-                }
-                None => {}
+            // 已推送过的集数出现新候选 → 视情况询问追加。
+            // 1) 先按订阅简繁偏好过滤：单语言偏好下反语言候选在此被静默剔除，
+            //    避免重启/新片源后把"本就被偏好筛掉"的条目标成未推送而误问。
+            // 2) 用户对该集记住"忽略"则永久跳过；否则仅当过滤后出现比
+            //    （已选版本 / 已推版本）更高的版本时才再问一次。
+            let allowed: Vec<Candidate> = filter_by_lang(&cands, &sub.lang_pref)
+                .into_iter()
+                .map(|i| cands[i].clone())
+                .collect();
+            let pref = db::get_episode_pref(&state.db, sub.id, ep as i64)?;
+            if !should_ask_update(&allowed, &already, pref) {
+                continue;
             }
-            ask_update(state, sub, ep, &cands).await?;
+            ask_update(state, sub, ep, &allowed).await?;
             report.asked += 1;
             continue;
         }
@@ -335,8 +335,8 @@ pub async fn process_subscription(
                     }
                 }
             }
-            Decision::Ask => {
-                ask_fresh(state, sub, ep, &cands).await?;
+            Decision::Ask(list) => {
+                ask_fresh(state, sub, ep, &list).await?;
                 report.asked += 1;
             }
             Decision::Skip => {}
@@ -490,15 +490,38 @@ pub(crate) fn decide_fresh(state: &AppState, sub: &SubRow, ep: u32, cands: &[Can
         if idxs.len() == 1 {
             return Ok(Decision::Push(vec![cands[idxs[0]].clone()]));
         }
-        // 同语言多个版本 → 问
-        return Ok(Decision::Ask);
+        // 同语言多个版本 → 问（只带过滤后的候选，反语言不参与展示/推送）
+        return Ok(Decision::Ask(
+            idxs.into_iter().map(|i| cands[i].clone()).collect(),
+        ));
     }
 
     // 3) 单候选直接推；多候选问
     if cands.len() == 1 {
         return Ok(Decision::Push(vec![cands[0].clone()]));
     }
-    Ok(Decision::Ask)
+    Ok(Decision::Ask(cands.to_vec()))
+}
+
+/// 已推送集是否需要就新候选追加询问。
+/// `allowed` 为按简繁偏好过滤后的候选；`already` 为已推 (版本, 语言, 片源)；
+/// `pref` 为该集的用户决定（None 版本表示"忽略"）。
+/// 规则：忽略 → 不问；否则仅当过滤后存在比（已选版本 / 已推版本）更高的版本才问。
+pub(crate) fn should_ask_update(
+    allowed: &[Candidate],
+    already: &[(i64, String, String)],
+    pref: Option<(String, Option<i64>)>,
+) -> bool {
+    if allowed.is_empty() {
+        return false;
+    }
+    let max_pushed = already.iter().map(|(v, _, _)| *v).max().unwrap_or(0);
+    let newest = allowed.iter().map(|c| c.version as i64).max().unwrap_or(0);
+    match pref {
+        Some((_, None)) => false,
+        Some((_, Some(chosen))) => newest > chosen.max(max_pushed),
+        None => newest > max_pushed,
+    }
 }
 
 pub(crate) async fn push_candidate(
@@ -638,11 +661,14 @@ pub(crate) async fn render_pending(state: &AppState, pending: &crate::models::Pe
         .collect();
 
     let (header, actions) = if pending.kind == "update" {
+        let pushed = db::pushed_for_episode(&state.db, sub.id, pending.episode)?;
         (
             format!(
-                "♻️ <b>{}</b> 第{}话 发现新版本\n{}\n\n追加推送？",
+                "♻️ <b>{}</b> 第{}话 发现{}\n已推送：{}\n新发现：\n{}\n\n追加推送？\n点序号=只追加该版本 · 忽略=以后不再问 · 稍后=下次再问",
                 notifier::html_escape(&sub.title),
                 fmt_episode(ep),
+                update_kind_label(&pushed, &cands),
+                summarize_pushed(&pushed),
                 lines.join("\n"),
             ),
             vec![
@@ -653,7 +679,7 @@ pub(crate) async fn render_pending(state: &AppState, pending: &crate::models::Pe
     } else {
         (
             format!(
-                "🧐 <b>{}</b> 第{}话 发现多个来源/版本\n{}\n\n要推送哪个？",
+                "🧐 <b>{}</b> 第{}话 发现多个来源/版本\n{}\n\n要推送哪个？\n点序号=只推该版本 · 全部=都推 · 跳过=以后不再问 · 稍后=下次再问",
                 notifier::html_escape(&sub.title),
                 fmt_episode(ep),
                 lines.join("\n"),
@@ -678,6 +704,57 @@ pub(crate) async fn render_pending(state: &AppState, pending: &crate::models::Pe
     rows.push(actions);
 
     send_to_admin(state, header, InlineKeyboardMarkup::new(rows)).await
+}
+
+/// 已推送记录 → 简短描述（语言 · 版本 · 片源，去重）
+fn summarize_pushed(pushed: &[(i64, String, String)]) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    for (v, lang, source) in pushed {
+        let mut p = String::new();
+        if !lang.is_empty() && lang != "未知" {
+            p.push_str(lang);
+        }
+        if *v > 1 {
+            if !p.is_empty() {
+                p.push_str(" · ");
+            }
+            p.push_str(&format!("v{v}"));
+        }
+        if !source.is_empty() {
+            if !p.is_empty() {
+                p.push_str(" · ");
+            }
+            p.push_str(source);
+        }
+        if p.is_empty() {
+            p.push_str("已推送");
+        }
+        if !parts.contains(&p) {
+            parts.push(p);
+        }
+    }
+    if parts.is_empty() {
+        "-".to_string()
+    } else {
+        parts.join(" / ")
+    }
+}
+
+/// 追加询问的标题后缀：与已推内容相比是"新版本"还是"新语言"
+fn update_kind_label(pushed: &[(i64, String, String)], cands: &[Candidate]) -> &'static str {
+    let max_pushed = pushed.iter().map(|(v, _, _)| *v).max().unwrap_or(0);
+    if cands.iter().any(|c| c.version as i64 > max_pushed) {
+        return "新版本";
+    }
+    let pushed_langs: Vec<&str> = pushed.iter().map(|(_, l, _)| l.as_str()).collect();
+    let has_new_lang = cands.iter().any(|c| {
+        !c.lang.is_empty() && c.lang != "未知" && !pushed_langs.contains(&c.lang.as_str())
+    });
+    if has_new_lang {
+        "新语言"
+    } else {
+        "新资源"
+    }
 }
 
 /// 处理冲突询问按钮回调（pick / pickall / skip / later / add / noadd）
