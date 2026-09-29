@@ -216,6 +216,15 @@ pub fn resolve_sub_by_index(db: &Db, idx: i64) -> Result<Option<i64>> {
     Ok(subs.get(idx as usize - 1).map(|s| s.id))
 }
 
+pub fn set_sub_title(db: &Db, id: i64, title: &str) -> Result<()> {
+    let conn = db.lock().unwrap();
+    conn.execute(
+        "UPDATE subscriptions SET title = ?1 WHERE id = ?2",
+        params![title, id],
+    )?;
+    Ok(())
+}
+
 pub fn set_sub_start(db: &Db, id: i64, start: i64) -> Result<()> {
     let conn = db.lock().unwrap();
     conn.execute(
@@ -357,6 +366,10 @@ pub fn set_sub_poster(db: &Db, id: i64, url: Option<&str>) -> Result<()> {
         params![url.unwrap_or(""), id],
     )?;
     Ok(())
+}
+
+pub fn clear_sub_poster(db: &Db, id: i64) -> Result<()> {
+    set_sub_poster(db, id, None)
 }
 
 // ---------------- pushed items ----------------

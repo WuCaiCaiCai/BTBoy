@@ -844,10 +844,11 @@ fn sub_detail(state: &Arc<AppState>, s: &SubRow) -> String {
 fn edit_kb(sub_id: i64) -> InlineKeyboardMarkup {
     InlineKeyboardMarkup::new(vec![
         vec![
+            InlineKeyboardButton::callback("番名", format!("edit:{sub_id}:title")),
             InlineKeyboardButton::callback("起始集", format!("edit:{sub_id}:start_episode")),
-            InlineKeyboardButton::callback("简繁", format!("editlangsel:{sub_id}")),
         ],
         vec![
+            InlineKeyboardButton::callback("简繁", format!("editlangsel:{sub_id}")),
             InlineKeyboardButton::callback("包含词", format!("edit:{sub_id}:include_kw")),
             InlineKeyboardButton::callback("排除词", format!("edit:{sub_id}:exclude_kw")),
         ],
@@ -1030,6 +1031,18 @@ async fn handle_conversation_text(
             m.insert("start_episode".to_string(), json!(text.parse::<i64>().unwrap_or(1)));
             show_sub_config(bot, state, chat_id, &serde_json::to_string(&m)?).await?;
         }
+        "await_sub_title" => {
+            let text = msg.text().unwrap_or("").trim().to_string();
+            if text.is_empty() {
+                return Ok(());
+            }
+            let mut m = serde_json::Map::new();
+            for (k, val) in v.as_object().unwrap() {
+                m.insert(k.clone(), val.clone());
+            }
+            m.insert("title".to_string(), json!(text));
+            show_new_poster_picker(bot, state, chat_id, &serde_json::to_string(&m)?).await?;
+        }
         "await_edit_value" => {
             let field = v["field"].as_str().unwrap_or("").to_string();
             let sub_id = v["sub_id"].as_i64().unwrap_or(0);
@@ -1067,7 +1080,8 @@ async fn handle_conversation_text(
             m.insert("exclude_kw".to_string(), json!(kw));
             show_sub_config(bot, state, chat_id, &serde_json::to_string(&m)?).await?;
         }
-        "await_sub_config" | "await_sub_lang" | "await_sub_source" | "await_sub_poster" => {
+        "await_sub_config" | "await_sub_lang" | "await_sub_source" | "await_sub_poster"
+        | "await_edit_poster" => {
             send(bot, chat_id, "请点击下方按钮操作，或 /cancel 取消", None).await?;
         }
         "await_import" => {
@@ -1170,6 +1184,17 @@ async fn apply_edit(
     val: &str,
 ) -> Result<()> {
     match field {
+        "title" => {
+            let title = val.trim();
+            if title.is_empty() {
+                send(bot, chat_id, "❌ 番名不能为空", None).await?;
+                return Ok(());
+            }
+            db::set_sub_title(&state.db, sub_id, title)?;
+            db::clear_sub_poster(&state.db, sub_id)?;
+            state.poster_cache.lock().unwrap().remove(&sub_id);
+            return re_search_poster_for_sub(bot, state, chat_id, sub_id, title).await;
+        }
         "start_episode" => {
             let n: i64 = val.parse().unwrap_or(1);
             db::set_sub_start(&state.db, sub_id, n)?;
@@ -1188,6 +1213,143 @@ async fn apply_edit(
     }
     db::conv_clear(&state.db, chat_id)?;
     send(bot, chat_id, format!("✅ 已更新 #{sub_id} 的 {field}"), None).await?;
+    Ok(())
+}
+
+/// 现有订阅改番名后，按新名字重搜 TMDB 展示封面选择（step=await_edit_poster）。
+/// 无 Key / 无结果时清对话并仅确认改名。
+async fn re_search_poster_for_sub(
+    bot: &Bot,
+    state: &Arc<AppState>,
+    uid: i64,
+    sub_id: i64,
+    title: &str,
+) -> Result<()> {
+    let Some(key) = state.config.tmdb_api_key.clone() else {
+        db::conv_clear(&state.db, uid)?;
+        send(
+            bot,
+            uid,
+            format!(
+                "✅ 已更新 #{sub_id} 番名为 <b>{}</b>（未配置 TMDB Key，封面未变动）",
+                html_escape(title)
+            ),
+            Some(edit_kb(sub_id)),
+        )
+        .await?;
+        return Ok(());
+    };
+    let hits = match crate::tmdb::search(&state.http, &key, title).await {
+        Ok(h) if !h.is_empty() => h,
+        _ => {
+            db::conv_clear(&state.db, uid)?;
+            send(
+                bot,
+                uid,
+                format!(
+                    "✅ 已更新 #{sub_id} 番名为 <b>{}</b>（未搜索到封面结果）",
+                    html_escape(title)
+                ),
+                Some(edit_kb(sub_id)),
+            )
+            .await?;
+            return Ok(());
+        }
+    };
+    let hits_json: Vec<serde_json::Value> = hits
+        .iter()
+        .map(|h| json!({"title": h.title, "year": h.year, "poster": h.poster}))
+        .collect();
+    db::conv_set(
+        &state.db,
+        uid,
+        &json!({
+            "step": "await_edit_poster",
+            "sub_id": sub_id,
+            "hits": hits_json,
+        })
+        .to_string(),
+    )?;
+
+    let mut rows: Vec<Vec<InlineKeyboardButton>> = Vec::new();
+    for (i, h) in hits.iter().take(6).enumerate() {
+        let label = match (&h.year, &h.poster) {
+            (Some(y), Some(_)) => format!("{} ({})", h.title, y),
+            _ => h.title.clone(),
+        };
+        let label: String = label.chars().take(40).collect();
+        rows.push(vec![InlineKeyboardButton::callback(
+            label,
+            format!("editposter:{sub_id}:{i}"),
+        )]);
+    }
+    rows.push(vec![InlineKeyboardButton::callback(
+        "无封面",
+        format!("editposter:{sub_id}:none"),
+    )]);
+    let list: Vec<String> = hits
+        .iter()
+        .take(6)
+        .map(|h| {
+            let year = h.year.as_deref().unwrap_or("?");
+            let has = if h.poster.is_some() { "🖼" } else { "—" };
+            format!("{has} {} ({year})", h.title)
+        })
+        .collect();
+    send(
+        bot,
+        uid,
+        format!(
+            "✅ 番名已改为 <b>{}</b>\n🎬 按新番名重搜 TMDB，选一个作为封面:\n{}",
+            html_escape(title),
+            list.join("\n")
+        ),
+        Some(InlineKeyboardMarkup::new(rows)),
+    )
+    .await?;
+    Ok(())
+}
+
+/// 现有订阅改番名后的封面选择回调：`editposter:{sub_id}:{idx|none}`
+async fn handle_edit_poster(bot: &Bot, state: &Arc<AppState>, uid: i64, rest: &str) -> Result<()> {
+    let mut it = rest.splitn(2, ':');
+    let sub_id = it.next().and_then(|s| s.parse::<i64>().ok()).unwrap_or(0);
+    let pick = it.next().unwrap_or("none");
+    let Some(data) = db::conv_get(&state.db, uid) else {
+        return Ok(());
+    };
+    let v: serde_json::Value = serde_json::from_str(&data)?;
+    let poster_url = if pick == "none" {
+        String::new()
+    } else {
+        let idx: usize = pick.parse().unwrap_or(0);
+        v["hits"][idx]["poster"].as_str().unwrap_or("").to_string()
+    };
+    db::set_sub_poster(
+        &state.db,
+        sub_id,
+        if poster_url.is_empty() {
+            None
+        } else {
+            Some(&poster_url)
+        },
+    )?;
+    state.poster_cache.lock().unwrap().remove(&sub_id);
+    db::conv_clear(&state.db, uid)?;
+    let title = db::get_subscription(&state.db, sub_id)?
+        .map(|s| s.title)
+        .unwrap_or_default();
+    send(
+        bot,
+        uid,
+        format!(
+            "✅ 已更新 #{} 番名与封面\n番名: <b>{}</b>",
+            sub_id,
+            html_escape(&title)
+        ),
+        Some(edit_kb(sub_id)),
+    )
+    .await?;
     Ok(())
 }
 
@@ -1251,6 +1413,7 @@ pub async fn handle_callback(bot: Bot, q: CallbackQuery, state: Arc<AppState>) -
         "edit" => handle_edit_start(&bot, &state, uid, rest).await,
         "editlangsel" => handle_edit_lang_sel(&bot, &state, uid, rest).await,
         "editlang" => handle_edit_lang(&bot, &state, uid, rest).await,
+        "editposter" => handle_edit_poster(&bot, &state, uid, rest).await,
         "toggle" => handle_toggle(&bot, &state, uid, rest).await,
         "del" => handle_del(&bot, &state, uid, rest).await,
         "delc" => handle_del_confirm(&bot, &state, uid, rest).await,
@@ -1355,16 +1518,19 @@ async fn show_sub_config(
 
     let kb = InlineKeyboardMarkup::new(vec![
         vec![
+            InlineKeyboardButton::callback("番名", "subedit:title"),
             InlineKeyboardButton::callback("起始集", "subedit:start"),
             InlineKeyboardButton::callback("简繁", "subedit:lang"),
-            InlineKeyboardButton::callback("片源", "subedit:source"),
         ],
         vec![
+            InlineKeyboardButton::callback("片源", "subedit:source"),
             InlineKeyboardButton::callback("包含词", "subinc"),
             InlineKeyboardButton::callback("排除词", "subexc"),
-            InlineKeyboardButton::callback("封面", "subedit:poster"),
         ],
-        vec![InlineKeyboardButton::callback("✅ 完成", "subfin")],
+        vec![
+            InlineKeyboardButton::callback("封面", "subedit:poster"),
+            InlineKeyboardButton::callback("✅ 完成", "subfin"),
+        ],
     ]);
 
     db::conv_set(&state.db, uid, &serde_json::to_string(&m)?)?;
@@ -1386,9 +1552,32 @@ async fn show_sub_config(
     Ok(())
 }
 
-/// 订阅编辑入口：start / lang / source / poster
+/// 订阅编辑入口：title / start / lang / source / poster
 async fn handle_sub_edit(bot: &Bot, state: &Arc<AppState>, uid: i64, rest: &str) -> Result<()> {
     match rest {
+        "title" => {
+            let Some(data) = db::conv_get(&state.db, uid) else {
+                return Ok(());
+            };
+            let v: serde_json::Value = serde_json::from_str(&data)?;
+            let mut m = serde_json::Map::new();
+            for (k, val) in v.as_object().unwrap() {
+                m.insert(k.clone(), val.clone());
+            }
+            m.insert("step".to_string(), json!("await_sub_title"));
+            db::conv_set(&state.db, uid, &serde_json::to_string(&m)?)?;
+            let cur = v["title"].as_str().unwrap_or("");
+            send(
+                bot,
+                uid,
+                format!(
+                    "当前番名: <b>{}</b>\n回复新的番名（改后会自动重搜封面，/cancel 取消）",
+                    html_escape(cur)
+                ),
+                None,
+            )
+            .await?;
+        }
         "start" => {
             let Some(data) = db::conv_get(&state.db, uid) else {
                 return Ok(());
@@ -1472,63 +1661,75 @@ async fn handle_sub_edit(bot: &Bot, state: &Arc<AppState>, uid: i64, rest: &str)
             let Some(data) = db::conv_get(&state.db, uid) else {
                 return Ok(());
             };
-            let v: serde_json::Value = serde_json::from_str(&data)?;
-            let title = v["title"].as_str().unwrap_or("").to_string();
-            let Some(key) = state.config.tmdb_api_key.clone() else {
-                send(bot, uid, "未配置 TMDB Key，无法搜索封面", None).await?;
-                return Ok(());
-            };
-            let hits = match crate::tmdb::search(&state.http, &key, &title).await {
-                Ok(h) if !h.is_empty() => h,
-                _ => {
-                    send(bot, uid, "未搜索到封面结果", None).await?;
-                    return show_sub_config(bot, state, uid, &data).await;
-                }
-            };
-            let hits_json: Vec<serde_json::Value> = hits
-                .iter()
-                .map(|h| json!({"title": h.title, "year": h.year, "poster": h.poster}))
-                .collect();
-            let mut m = serde_json::Map::new();
-            for (k, val) in v.as_object().unwrap() {
-                m.insert(k.clone(), val.clone());
-            }
-            m.insert("step".to_string(), json!("await_sub_poster"));
-            m.insert("hits".to_string(), json!(hits_json));
-            db::conv_set(&state.db, uid, &serde_json::to_string(&m)?)?;
-
-            let mut rows: Vec<Vec<InlineKeyboardButton>> = Vec::new();
-            for (i, h) in hits.iter().take(6).enumerate() {
-                let label = match (&h.year, &h.poster) {
-                    (Some(y), Some(_)) => format!("{} ({})", h.title, y),
-                    _ => h.title.clone(),
-                };
-                let label: String = label.chars().take(40).collect();
-                rows.push(vec![InlineKeyboardButton::callback(
-                    label,
-                    format!("subposter:{i}"),
-                )]);
-            }
-            rows.push(vec![InlineKeyboardButton::callback("无封面", "subposter:none")]);
-            let list: Vec<String> = hits
-                .iter()
-                .take(6)
-                .map(|h| {
-                    let year = h.year.as_deref().unwrap_or("?");
-                    let has = if h.poster.is_some() { "🖼" } else { "—" };
-                    format!("{has} {} ({year})", h.title)
-                })
-                .collect();
-            send(
-                bot,
-                uid,
-                format!("🎬 TMDB 搜索结果，选一个作为封面:\n{}", list.join("\n")),
-                Some(InlineKeyboardMarkup::new(rows)),
-            )
-            .await?;
+            return show_new_poster_picker(bot, state, uid, &data).await;
         }
         _ => {}
     }
+    Ok(())
+}
+
+/// 按当前 conv 里的 title 搜 TMDB 并展示封面选择（step=await_sub_poster）。
+/// 未配置 Key 或无结果时回退订阅配置屏。
+async fn show_new_poster_picker(
+    bot: &Bot,
+    state: &Arc<AppState>,
+    uid: i64,
+    conv_json: &str,
+) -> Result<()> {
+    let v: serde_json::Value = serde_json::from_str(conv_json)?;
+    let title = v["title"].as_str().unwrap_or("").to_string();
+    let Some(key) = state.config.tmdb_api_key.clone() else {
+        send(bot, uid, "未配置 TMDB Key，跳过封面搜索", None).await?;
+        return show_sub_config(bot, state, uid, conv_json).await;
+    };
+    let hits = match crate::tmdb::search(&state.http, &key, &title).await {
+        Ok(h) if !h.is_empty() => h,
+        _ => {
+            send(bot, uid, "未搜索到封面结果", None).await?;
+            return show_sub_config(bot, state, uid, conv_json).await;
+        }
+    };
+    let hits_json: Vec<serde_json::Value> = hits
+        .iter()
+        .map(|h| json!({"title": h.title, "year": h.year, "poster": h.poster}))
+        .collect();
+    let mut m = serde_json::Map::new();
+    for (k, val) in v.as_object().unwrap() {
+        m.insert(k.clone(), val.clone());
+    }
+    m.insert("step".to_string(), json!("await_sub_poster"));
+    m.insert("hits".to_string(), json!(hits_json));
+    db::conv_set(&state.db, uid, &serde_json::to_string(&m)?)?;
+
+    let mut rows: Vec<Vec<InlineKeyboardButton>> = Vec::new();
+    for (i, h) in hits.iter().take(6).enumerate() {
+        let label = match (&h.year, &h.poster) {
+            (Some(y), Some(_)) => format!("{} ({})", h.title, y),
+            _ => h.title.clone(),
+        };
+        let label: String = label.chars().take(40).collect();
+        rows.push(vec![InlineKeyboardButton::callback(
+            label,
+            format!("subposter:{i}"),
+        )]);
+    }
+    rows.push(vec![InlineKeyboardButton::callback("无封面", "subposter:none")]);
+    let list: Vec<String> = hits
+        .iter()
+        .take(6)
+        .map(|h| {
+            let year = h.year.as_deref().unwrap_or("?");
+            let has = if h.poster.is_some() { "🖼" } else { "—" };
+            format!("{has} {} ({year})", h.title)
+        })
+        .collect();
+    send(
+        bot,
+        uid,
+        format!("🎬 TMDB 搜索结果，选一个作为封面:\n{}", list.join("\n")),
+        Some(InlineKeyboardMarkup::new(rows)),
+    )
+    .await?;
     Ok(())
 }
 
@@ -1669,6 +1870,7 @@ async fn handle_edit_start(
     let field = it.next().unwrap_or("");
     let cur = db::get_subscription(&state.db, sub_id)?
         .map(|s| match field {
+            "title" => s.title.clone(),
             "start_episode" => s.start_episode.to_string(),
             "include_kw" => s.include_kw.clone(),
             "exclude_kw" => s.exclude_kw.clone(),
